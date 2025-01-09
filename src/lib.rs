@@ -5,6 +5,7 @@ use polars::io::prelude::*;
 use polars::prelude::{CsvReadOptions, DataFrame};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 fn separate_usa_layers<B: anndata::Backend>(
     b: AnnData<B>,
@@ -25,19 +26,19 @@ fn separate_usa_layers<B: anndata::Backend>(
 
     let slice1: ArrayData = b.get_x().slice(s![.., 0..ngenes])?.unwrap();
     let var1 = vars.slice(0_i64, ngenes);
-    eprintln!("getting slice took {:#?}", sw.elapsed());
+    info!("getting slice took {:#?}", sw.elapsed());
     sw.reset();
     sw.start()?;
 
     let slice2: ArrayData = b.get_x().slice(s![.., ngenes..2 * ngenes])?.unwrap();
     let var2 = vars.slice(ngenes as i64, ngenes);
-    eprintln!("getting slice took {:#?}", sw.elapsed());
+    info!("getting slice took {:#?}", sw.elapsed());
     sw.reset();
     sw.start()?;
 
     let slice3: ArrayData = b.get_x().slice(s![.., 2 * ngenes..3 * ngenes])?.unwrap();
     let var3 = vars.slice(2_i64 * ngenes as i64, ngenes);
-    eprintln!("getting slice took {:#?}", sw.elapsed());
+    info!("getting slice took {:#?}", sw.elapsed());
     sw.reset();
     sw.start()?;
 
@@ -66,7 +67,7 @@ fn separate_usa_layers<B: anndata::Backend>(
     ];
     b.set_layers(layers)
         .context("unable to set layers for AnnData object")?;
-    eprintln!("setting layers took {:#?}", sw.elapsed());
+    info!("setting layers took {:#?}", sw.elapsed());
     b.set_varm(varm)?;
     b.set_obs(row_df)?;
 
@@ -123,7 +124,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         false
     };
 
-    eprintln!("USA mode : {}", usa_mode);
+    info!("USA mode : {}", usa_mode);
 
     let mut sw = libsw::Sw::new();
     sw.start()?;
@@ -147,7 +148,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     // make the AnnData object and populate it from the MMReader
     let b = AnnData::<H5>::new(output_path.as_ref())?;
     r.finish(&b)?;
-    eprintln!("Reading MM into AnnData took {:#?}", sw.elapsed());
+    info!("Reading MM into AnnData took {:#?}", sw.elapsed());
 
     if usa_mode {
         separate_usa_layers(b, row_df, col_df)?;
