@@ -22,7 +22,6 @@ fn separate_usa_layers<B: anndata::Backend>(
 
     // Get the unspliced, spliced and ambiguous slices
     let vars = col_df;
-    eprintln!("vars : {:#?}", vars.shape());
 
     let slice1: ArrayData = b.get_x().slice(s![.., 0..ngenes])?.unwrap();
     let var1 = vars.slice(0_i64, ngenes);
