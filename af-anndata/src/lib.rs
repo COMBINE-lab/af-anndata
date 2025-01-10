@@ -5,7 +5,7 @@ use polars::io::prelude::*;
 use polars::prelude::{CsvReadOptions, DataFrame};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use tracing::{info, warn};
+use tracing::info;
 
 fn separate_usa_layers<B: anndata::Backend>(
     b: AnnData<B>,
