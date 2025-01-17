@@ -150,6 +150,26 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     r.finish(&b)?;
     info!("Reading MM into AnnData took {:#?}", sw.elapsed());
 
+    // read in the generate_permit_list JSON file
+    let mut gpl_path = PathBuf::from(&root_path);
+    gpl_path.push("generate_permit_list.json");
+    let jf = std::fs::File::open(&gpl_path)?;
+    let gpl_json: Value = serde_json::from_reader(jf)
+        .with_context(|| format!("could not parse {} as valid JSON.", gpl_path.display()))?;
+
+    // set unstructured metadata
+    let quant_json_str = serde_json::to_string(&quant_json)
+        .context("could not convert quant.json to string succesfully to place in uns data.")?;
+    let gpl_json_str = serde_json::to_string(&gpl_json).context(
+        "could not convert generate_permit_list.json to string succesfully to place in uns data.",
+    )?;
+
+    let uns: Vec<(String, anndata::Data)> = vec![
+        ("quant_info".to_owned(), anndata::Data::from(quant_json_str)),
+        ("gpl_info".to_owned(), anndata::Data::from(gpl_json_str)),
+    ];
+    b.set_uns(uns).context("failed to set \"uns\" data")?;
+
     if usa_mode {
         separate_usa_layers(b, row_df, col_df)?;
     } else {
