@@ -150,6 +150,23 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     r.finish(&b)?;
     info!("Reading MM into AnnData took {:#?}", sw.elapsed());
 
+    // read in the feature dump data
+    let mut feat_dump_path = PathBuf::from(&root_path);
+    feat_dump_path.push("featureDump.txt");
+    let feat_parse_options =
+        polars::io::csv::read::CsvParseOptions::default().with_separator(b'\t');
+    let feat_dump_frame = polars_io::csv::read::CsvReadOptions::default()
+        .with_parse_options(feat_parse_options)
+        .with_has_header(true)
+        .try_into_reader_with_file_path(Some(feat_dump_path))
+        .context("could not create TSV file reader")?
+        .finish()
+        .context("could not parse feature TSV file")?;
+    // add the features to the row df
+    // skip the first column since it is `CB` (the cell barcode) and is
+    // redundant with the cell barcode we already have in this dataframe
+    let row_df = row_df.hstack(&feat_dump_frame.take_columns()[1..])?;
+
     // read in the generate_permit_list JSON file
     let mut gpl_path = PathBuf::from(&root_path);
     gpl_path.push("generate_permit_list.json");
