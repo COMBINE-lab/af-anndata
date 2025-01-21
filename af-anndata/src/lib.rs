@@ -25,6 +25,15 @@ fn separate_usa_layers<B: anndata::Backend>(
     let vars = col_df;
 
     let slice1: ArrayData = b.get_x().slice(s![.., 0..ngenes])?.unwrap();
+
+    match slice1 {
+        anndata::data::array::ArrayData::Array(ref a) => info!("Array"),
+        anndata::data::array::ArrayData::CsrMatrix(ref a) => info!("CSR"),
+        anndata::data::array::ArrayData::CscMatrix(ref a) => info!("CSC"),
+        anndata::data::array::ArrayData::CsrNonCanonical(ref a) => info!("CSR Non-canonical"),
+        anndata::data::array::ArrayData::DataFrame(ref a) => info!("DataFrame"),
+    }
+
     let var1 = vars.slice(0_i64, ngenes);
     info!("getting slice took {:#?}", sw.elapsed());
     sw.reset();
