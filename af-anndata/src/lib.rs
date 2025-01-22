@@ -268,12 +268,12 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
             json_path.display()
         );
     }
-    let gene_id_to_name_path = if !gene_id_to_name_path.is_file() {
+    let gene_id_to_name_path = gene_id_to_name_path
+        .is_file()
+        .then_some(gene_id_to_name_path);
+    if gene_id_to_name_path.is_none() {
         warn!("Could not find the `gene_id_to_name` file, so only gene IDs and not symbols will be present in `var`");
-        None
-    } else {
-        Some(gene_id_to_name_path)
-    };
+    }
 
     let jf = std::fs::File::open(&json_path)?;
     let quant_json: Value = serde_json::from_reader(jf)
