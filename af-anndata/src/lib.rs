@@ -228,8 +228,16 @@ fn separate_usa_layers<B: anndata::Backend>(
 
 pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> anyhow::Result<()> {
     let root_path = root_path.as_ref();
-    let mut json_path = PathBuf::from(&root_path);
-    json_path.push("quant.json");
+    let json_path = PathBuf::from(&root_path);
+
+    let mut gpl_path = json_path.clone();
+    gpl_path.push("generate_permit_list.json");
+
+    let mut collate_path = json_path.clone();
+    collate_path.push("collate.json");
+
+    let mut quant_path = json_path.clone();
+    quant_path.push("quant.json");
 
     let alevin_path = root_path.join("alevin");
     let mut p = PathBuf::from(&alevin_path);
@@ -262,22 +270,46 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
             rowpath.display()
         );
     }
-    if !json_path.is_file() {
+    if !gpl_path.is_file() {
         anyhow::bail!(
-            "the json file was expected at {} but could not be found",
-            json_path.display()
+            "the generate_permit_list json file was expected at {} but could not be found",
+            gpl_path.display()
         );
     }
+    if !collate_path.is_file() {
+        anyhow::bail!(
+            "the collate json file was expected at {} but could not be found",
+            collate_path.display()
+        );
+    }
+    if !quant_path.is_file() {
+        anyhow::bail!(
+            "the quant json file was expected at {} but could not be found",
+            quant_path.display()
+        );
+    }
+
+    // see if we have a valid gene id to name file
     let gene_id_to_name_path = gene_id_to_name_path
         .is_file()
         .then_some(gene_id_to_name_path);
+    // otherwise, wan the user
     if gene_id_to_name_path.is_none() {
         warn!("Could not find the `gene_id_to_name` file, so only gene IDs and not symbols will be present in `var`");
     }
 
-    let jf = std::fs::File::open(&json_path)?;
-    let quant_json: Value = serde_json::from_reader(jf)
-        .with_context(|| format!("could not parse {} as valid JSON.", json_path.display()))?;
+    // read in the relevant JSON files
+    let qf = std::fs::File::open(&quant_path)?;
+    let quant_json: Value = serde_json::from_reader(qf)
+        .with_context(|| format!("could not parse {} as valid JSON.", quant_path.display()))?;
+
+    let cf = std::fs::File::open(&collate_path)?;
+    let collate_json: Value = serde_json::from_reader(cf)
+        .with_context(|| format!("could not parse {} as valid JSON.", collate_path.display()))?;
+
+    let gplf = std::fs::File::open(&gpl_path)?;
+    let gpl_json: Value = serde_json::from_reader(gplf)
+        .with_context(|| format!("could not parse {} as valid JSON.", gpl_path.display()))?;
 
     let usa_mode = if let Some(Value::Bool(v)) = quant_json.get("usa_mode") {
         *v
@@ -393,23 +425,23 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     // redundant with the cell barcode we already have in this dataframe
     let row_df = row_df.hstack(&feat_dump_frame.take_columns()[1..])?;
 
-    // read in the generate_permit_list JSON file
-    let mut gpl_path = PathBuf::from(&root_path);
-    gpl_path.push("generate_permit_list.json");
-    let jf = std::fs::File::open(&gpl_path)?;
-    let gpl_json: Value = serde_json::from_reader(jf)
-        .with_context(|| format!("could not parse {} as valid JSON.", gpl_path.display()))?;
-
-    // set unstructured metadata
-    let quant_json_str = serde_json::to_string(&quant_json)
-        .context("could not convert quant.json to string succesfully to place in uns data.")?;
+    // read in the quant JSON file
     let gpl_json_str = serde_json::to_string(&gpl_json).context(
         "could not convert generate_permit_list.json to string succesfully to place in uns data.",
     )?;
+    let collate_json_str = serde_json::to_string(&collate_json)
+        .context("could not convert collate.json to string succesfully to place in uns data.")?;
+    let quant_json_str = serde_json::to_string(&quant_json)
+        .context("could not convert quant.json to string succesfully to place in uns data.")?;
 
+    // set unstructured metadata
     let uns: Vec<(String, anndata::Data)> = vec![
-        ("quant_info".to_owned(), anndata::Data::from(quant_json_str)),
         ("gpl_info".to_owned(), anndata::Data::from(gpl_json_str)),
+        (
+            "collate_info".to_owned(),
+            anndata::Data::from(collate_json_str),
+        ),
+        ("quant_info".to_owned(), anndata::Data::from(quant_json_str)),
     ];
     b.set_uns(uns).context("failed to set \"uns\" data")?;
 
