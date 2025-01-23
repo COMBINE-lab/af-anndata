@@ -5,7 +5,7 @@ use polars::io::prelude::*;
 use polars::prelude::{CsvReadOptions, DataFrame, Series, SortMultipleOptions};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use tracing::{info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 enum PopulatedMatType {
     I32,
@@ -292,9 +292,11 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
 
     let r = MMReader::from_path(&p)?;
 
+    let parse_opts = CsvParseOptions::default().with_separator(b'\t');
     // read the gene ids
     let mut col_df = CsvReadOptions::default()
         .with_has_header(false)
+        .with_parse_options(parse_opts.clone())
         .try_into_reader_with_file_path(Some(colpath))?
         .finish()?;
     col_df.set_column_names(["gene_id"])?;
@@ -302,9 +304,19 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     // read the barcodes
     let mut row_df = CsvReadOptions::default()
         .with_has_header(false)
+        .with_parse_options(parse_opts.clone())
         .try_into_reader_with_file_path(Some(rowpath))?
         .finish()?;
-    row_df.set_column_names(["barcodes"])?;
+
+    let nobs_cols = row_df.get_columns().len();
+    match nobs_cols {
+        1 => row_df.set_column_names(["barcodes"])?,
+        3 => row_df.set_column_names(["barcodes", "spot_x", "spot_y"])?,
+        x => {
+            error!("quants_mat_rows.txt file should have 1 (sc/sn-RNA) or 3 columns (spatial); the provided file has {}", x);
+            bail!("quants_mat_rows.txt file should have 1 (sc/sn-RNA) or 3 columns (spatial); the provided file has {}", x);
+        }
+    }
 
     // read the gene_id_to_name file
     let var_df = if let Some(id_to_name) = gene_id_to_name_path {
@@ -324,7 +336,6 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         );
 
         // read the gene id to name file
-        let parse_opts = CsvParseOptions::default().with_separator(b'\t');
         let mut vd = CsvReadOptions::default()
             .with_has_header(false)
             .with_parse_options(parse_opts)
