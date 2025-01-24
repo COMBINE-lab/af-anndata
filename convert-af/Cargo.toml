@@ -1,9 +1,16 @@
 [package]
 name = "convert-af"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+license-file = "LICENSE"
+description = "A library for converting alevin-fry output to the AnnData format"
+homepage = "https://github.com/COMBINE-lab/convert-af"
+repository = "https://github.com/COMBINE-lab/convert-af"
+readme = "README.md"
+keywords = ["anndata", "single-cell", "genomics"]
+categories = ["science", "science::bioinformatics"]
 
 [dependencies]
-af-anndata = { path = "../af-anndata" }
+af-anndata = { version = "0.2.0", path = "../af-anndata" }
 anyhow = "1.0.95"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

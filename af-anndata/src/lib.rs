@@ -7,6 +7,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tracing::{error, info, trace, warn};
 
+/// Tags the actual type of matrix that has
+/// been populated in a `CSRMatPaack`
 enum PopulatedMatType {
     I32,
     I64,
@@ -14,22 +16,22 @@ enum PopulatedMatType {
     F64,
 }
 
+/// Holds the different representable types of
+/// matrices. It is expected that only
+/// one of these should be populated.
 struct CSRMatPack {
     pub mat_i32: nalgebra_sparse::CsrMatrix<i32>,
     pub mat_i64: nalgebra_sparse::CsrMatrix<i64>,
-    //pub mat_u32: nalgebra_sparse::CsrMatrix<i64>,
-    //pub mat_u64: nalgebra_sparse::CsrMatrix<i64>,
     pub mat_f32: nalgebra_sparse::CsrMatrix<f32>,
     pub mat_f64: nalgebra_sparse::CsrMatrix<f64>,
 }
 
 impl CSRMatPack {
+    /// Create a new CSRMatPack with empty matrices for all supported types
     pub fn new(nr: usize, ngenes: usize) -> Self {
         Self {
             mat_i32: nalgebra_sparse::CsrMatrix::<i32>::zeros(nr, ngenes),
             mat_i64: nalgebra_sparse::CsrMatrix::<i64>::zeros(nr, ngenes),
-            //mat_u32: nalgebra_sparse::CsrMatrix::<i64>::zeros(nr, ngenes),
-            //mat_u64: nalgebra_sparse::CsrMatrix::<i64>::zeros(nr, ngenes),
             mat_f32: nalgebra_sparse::CsrMatrix::<f32>::zeros(nr, ngenes),
             mat_f64: nalgebra_sparse::CsrMatrix::<f64>::zeros(nr, ngenes),
         }
@@ -43,17 +45,33 @@ impl CSRMatPack {
         self.mat_f64.ncols()
     }
 
-    pub fn populated_type(&self) -> Option<PopulatedMatType> {
+    /// Returns a `PopulatedMatType` enum specifying the type of matrix in this
+    /// pack that is populated.  If more than one type is populated, it returns
+    /// an error.
+    pub fn populated_type(&self) -> anyhow::Result<Option<PopulatedMatType>> {
+        let mut t: Option<PopulatedMatType> = None;
+        let mut nset = 0_usize;
         if self.mat_i32.nnz() > 0 {
-            return Some(PopulatedMatType::I32);
+            nset += 1;
+            t = Some(PopulatedMatType::I32);
         } else if self.mat_i64.nnz() > 0 {
-            return Some(PopulatedMatType::I64);
+            nset += 1;
+            t = Some(PopulatedMatType::I64);
         } else if self.mat_f32.nnz() > 0 {
-            return Some(PopulatedMatType::F32);
+            nset += 1;
+            t = Some(PopulatedMatType::F32);
         } else if self.mat_f64.nnz() > 0 {
-            return Some(PopulatedMatType::F64);
+            nset += 1;
+            t = Some(PopulatedMatType::F64);
         }
-        None
+        if nset > 1 {
+            bail!("The CSRMatPack has > 1 set matrix type. This should not happen");
+        }
+        if t.is_some() {
+            Ok(t)
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -85,11 +103,9 @@ fn accumulate_layer(slice: &ArrayData, mut csr_accum: CSRMatPack) -> anyhow::Res
                 }
                 anndata::data::array::DynCsrMatrix::U32(ref _l) => {
                     bail!("Addition is not supported for U32 CSR matrices because they do not satisfy NEG<Output=T>; storing result in an i64");
-                    //csr_accum.mat_u32 = l + csr_accum.mat_u32;
                 }
                 anndata::data::array::DynCsrMatrix::U64(ref _l) => {
                     bail!("Addition is not supported for U32 CSR matrices because they do not satisfy NEG<Output=T>; storing result in an i64");
-                    //csr_accum.mat_u64 = csr_accum.mat_u64 + l;
                 }
                 anndata::data::array::DynCsrMatrix::F32(ref l) => {
                     csr_accum.mat_f32 = csr_accum.mat_f32 + l;
@@ -122,7 +138,10 @@ fn set_x_layer<B: anndata::Backend>(b: &mut AnnData<B>, csr_in: CSRMatPack) -> a
     b.set_n_vars(csr_in.ngenes())
         .context("unable to set n_vars")?;
     // set the new X
-    match csr_in.populated_type() {
+    match csr_in
+        .populated_type()
+        .context("error getting populated type of the X matrix")?
+    {
         Some(PopulatedMatType::I32) => {
             let csr_mat = anndata::data::array::DynCsrMatrix::I32(csr_in.mat_i32);
             b.set_x(csr_mat).context("unable to set all 0s X")?;
