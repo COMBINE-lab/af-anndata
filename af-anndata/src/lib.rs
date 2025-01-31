@@ -432,7 +432,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     feat_dump_path.push("featureDump.txt");
     let feat_parse_options =
         polars::io::csv::read::CsvParseOptions::default().with_separator(b'\t');
-    let feat_dump_frame = polars_io::csv::read::CsvReadOptions::default()
+    let mut feat_dump_frame = polars_io::csv::read::CsvReadOptions::default()
         .with_parse_options(feat_parse_options)
         .with_has_header(true)
         .try_into_reader_with_file_path(Some(feat_dump_path))
@@ -442,6 +442,20 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     // add the features to the row df
     // skip the first column since it is `CB` (the cell barcode) and is
     // redundant with the cell barcode we already have in this dataframe
+    // CB      CorrectedReads  MappedReads     DeduplicatedReads       MappingRate     DedupRate       MeanByMax       NumGenesExpressed       NumGenesOverMean
+    let col_rename = vec![
+        ("CorrectedReads", "corrected_reads"),
+        ("MappedReads", "mapped_reads"),
+        ("DeduplicatedReads", "deduplicated_reads"),
+        ("MappingRate", "mapping_rate"),
+        ("DedupRate", "dedup_rate"),
+        ("MeanByMax", "mean_by_max"),
+        ("NumGenesExpressed", "num_expressed"),
+        ("NumGenesOverMean", "num_genes_over_mean"),
+    ];
+    for (old_name, new_name) in col_rename {
+        feat_dump_frame.rename(old_name, new_name.into())?;
+    }
     let row_df = row_df.hstack(&feat_dump_frame.take_columns()[1..])?;
 
     // read in the quant JSON file
