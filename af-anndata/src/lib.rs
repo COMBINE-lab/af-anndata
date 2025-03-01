@@ -348,6 +348,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let mut col_df = CsvReadOptions::default()
         .with_has_header(false)
         .with_parse_options(parse_opts.clone())
+        .with_raise_if_empty(true)
         .try_into_reader_with_file_path(Some(colpath))?
         .finish()?;
     col_df.set_column_names(["gene_id"])?;
@@ -356,6 +357,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let mut row_df = CsvReadOptions::default()
         .with_has_header(false)
         .with_parse_options(parse_opts.clone())
+        .with_raise_if_empty(true)
         .try_into_reader_with_file_path(Some(rowpath))?
         .finish()?;
 
@@ -390,6 +392,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         let mut vd = CsvReadOptions::default()
             .with_has_header(false)
             .with_parse_options(parse_opts)
+            .with_raise_if_empty(true)
             .try_into_reader_with_file_path(Some(id_to_name))?
             .finish()?;
 
@@ -435,6 +438,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let mut feat_dump_frame = polars_io::csv::read::CsvReadOptions::default()
         .with_parse_options(feat_parse_options)
         .with_has_header(true)
+        .with_raise_if_empty(true)
         .try_into_reader_with_file_path(Some(feat_dump_path))
         .context("could not create TSV file reader")?
         .finish()

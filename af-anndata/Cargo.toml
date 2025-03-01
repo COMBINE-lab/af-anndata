@@ -1,6 +1,6 @@
 [package]
 name = "af-anndata"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license-file = "LICENSE"
 description = "A library for converting alevin-fry output to the AnnData format"
@@ -18,10 +18,10 @@ path = "src/lib.rs"
 [dependencies]
 anndata = "0.6.1"
 anndata-hdf5 = "0.5.0"
-anyhow = "1.0.95"
+anyhow = "1.0.96"
 libsw = "3.4.0"
 nalgebra-sparse = { version = "0.10.0", features = ["io"] }
 polars = { version = "0.45.1", features = ["polars-io"] }
 polars-io = { version = "0.45.1", features = ["csv", "json"] }
-serde_json = "1.0.137"
+serde_json = "1.0.139"
 tracing = "0.1.41"
