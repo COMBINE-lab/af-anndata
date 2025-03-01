@@ -1,6 +1,6 @@
 [package]
 name = "convert-af"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license-file = "LICENSE"
 description = "A library for converting alevin-fry output to the AnnData format"
