@@ -1,8 +1,8 @@
-use anndata::{reader::MMReader, s, AnnData, AnnDataOp, ArrayData, ArrayElemOp};
+use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, reader::MMReader, s};
 use anndata_hdf5::H5;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use polars::io::prelude::*;
-use polars::prelude::{CsvReadOptions, DataFrame, Series, SortMultipleOptions};
+use polars::prelude::{CsvReadOptions, DataFrame, PolarsError, Series, SortMultipleOptions};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tracing::{error, info, trace, warn};
@@ -67,11 +67,7 @@ impl CSRMatPack {
         if nset > 1 {
             bail!("The CSRMatPack has > 1 set matrix type. This should not happen");
         }
-        if t.is_some() {
-            Ok(t)
-        } else {
-            Ok(None)
-        }
+        if t.is_some() { Ok(t) } else { Ok(None) }
     }
 }
 
@@ -80,43 +76,47 @@ impl CSRMatPack {
 /// success. If an unsupported matrix type is provided in the `slice`, an error is raised.
 fn accumulate_layer(slice: &ArrayData, mut csr_accum: CSRMatPack) -> anyhow::Result<CSRMatPack> {
     match slice {
-        anndata::data::array::ArrayData::CsrMatrix(ref a) => {
+        anndata::data::array::ArrayData::CsrMatrix(a) => {
             trace!("confirmed ArrayData slice is in CSR format");
             match a {
-                anndata::data::array::DynCsrMatrix::I8(ref _l) => {
+                anndata::data::array::DynCsrMatrix::I8(_l) => {
                     bail!("I8 matrix type is not supported")
                 }
-                anndata::data::array::DynCsrMatrix::I16(ref _l) => {
+                anndata::data::array::DynCsrMatrix::I16(_l) => {
                     bail!("I16 matrix type is not supported")
                 }
-                anndata::data::array::DynCsrMatrix::I32(ref l) => {
+                anndata::data::array::DynCsrMatrix::I32(l) => {
                     csr_accum.mat_i32 = csr_accum.mat_i32 + l;
                 }
-                anndata::data::array::DynCsrMatrix::I64(ref l) => {
+                anndata::data::array::DynCsrMatrix::I64(l) => {
                     csr_accum.mat_i64 = csr_accum.mat_i64 + l;
                 }
-                anndata::data::array::DynCsrMatrix::U8(ref _l) => {
+                anndata::data::array::DynCsrMatrix::U8(_l) => {
                     bail!("U8 matrix type is not supported")
                 }
-                anndata::data::array::DynCsrMatrix::U16(ref _l) => {
+                anndata::data::array::DynCsrMatrix::U16(_l) => {
                     bail!("U16 matrix type is not supported")
                 }
-                anndata::data::array::DynCsrMatrix::U32(ref _l) => {
-                    bail!("Addition is not supported for U32 CSR matrices because they do not satisfy NEG<Output=T>; storing result in an i64");
+                anndata::data::array::DynCsrMatrix::U32(_l) => {
+                    bail!(
+                        "Addition is not supported for U32 CSR matrices because they do not satisfy NEG<Output=T>; storing result in an i64"
+                    );
                 }
-                anndata::data::array::DynCsrMatrix::U64(ref _l) => {
-                    bail!("Addition is not supported for U32 CSR matrices because they do not satisfy NEG<Output=T>; storing result in an i64");
+                anndata::data::array::DynCsrMatrix::U64(_l) => {
+                    bail!(
+                        "Addition is not supported for U32 CSR matrices because they do not satisfy NEG<Output=T>; storing result in an i64"
+                    );
                 }
-                anndata::data::array::DynCsrMatrix::F32(ref l) => {
+                anndata::data::array::DynCsrMatrix::F32(l) => {
                     csr_accum.mat_f32 = csr_accum.mat_f32 + l;
                 }
-                anndata::data::array::DynCsrMatrix::F64(ref l) => {
+                anndata::data::array::DynCsrMatrix::F64(l) => {
                     csr_accum.mat_f64 = csr_accum.mat_f64 + l;
                 }
-                anndata::data::array::DynCsrMatrix::Bool(ref _l) => {
+                anndata::data::array::DynCsrMatrix::Bool(_l) => {
                     bail!("Bool matrix type is not supported")
                 }
-                anndata::data::array::DynCsrMatrix::String(ref _l) => {
+                anndata::data::array::DynCsrMatrix::String(_l) => {
                     bail!("String matrix type is not supported")
                 }
             };
@@ -159,7 +159,9 @@ fn set_x_layer<B: anndata::Backend>(b: &mut AnnData<B>, csr_in: CSRMatPack) -> a
             b.set_x(csr_mat).context("unable to set all 0s X")?;
         }
         None => {
-            warn!("None of the underlying matrices for the layers had counts; setting the output to the trivial empty matrix (of type f64)");
+            warn!(
+                "None of the underlying matrices for the layers had counts; setting the output to the trivial empty matrix (of type f64)"
+            );
             let csr_mat = anndata::data::array::DynCsrMatrix::F64(
                 nalgebra_sparse::CsrMatrix::<f64>::zeros(csr_in.ncells(), csr_in.ngenes()),
             );
@@ -314,7 +316,9 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         .then_some(gene_id_to_name_path);
     // otherwise, wan the user
     if gene_id_to_name_path.is_none() {
-        warn!("Could not find the `gene_id_to_name` file, so only gene IDs and not symbols will be present in `var`");
+        warn!(
+            "Could not find the `gene_id_to_name` file, so only gene IDs and not symbols will be present in `var`"
+        );
     }
 
     // read in the relevant JSON files
@@ -345,29 +349,58 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
 
     let parse_opts = CsvParseOptions::default().with_separator(b'\t');
     // read the gene ids
-    let mut col_df = CsvReadOptions::default()
+    let mut col_df = match CsvReadOptions::default()
         .with_has_header(false)
         .with_parse_options(parse_opts.clone())
         .with_raise_if_empty(true)
         .try_into_reader_with_file_path(Some(colpath))?
-        .finish()?;
+        .finish()
+    {
+        Ok(dframe) => dframe,
+        Err(PolarsError::NoData(estr)) => {
+            error!("error reading column labels : {:?};", estr);
+            bail!("failed to construct the column data frame.");
+        }
+        Err(err) => {
+            bail!(err);
+        }
+    };
     col_df.set_column_names(["gene_id"])?;
 
     // read the barcodes
-    let mut row_df = CsvReadOptions::default()
+    let mut row_df = match CsvReadOptions::default()
         .with_has_header(false)
         .with_parse_options(parse_opts.clone())
         .with_raise_if_empty(true)
         .try_into_reader_with_file_path(Some(rowpath))?
-        .finish()?;
+        .finish()
+    {
+        Ok(dframe) => dframe,
+        Err(PolarsError::NoData(estr)) => {
+            error!("error reading row labels : {:?};", estr);
+            error!(
+                "this likely indicates the row labels (barcode list) was empty --- please ensure the barcode list is properly matched to the chemistry being processed"
+            );
+            bail!("failed to construct the row data frame.");
+        }
+        Err(err) => {
+            bail!(err);
+        }
+    };
 
     let nobs_cols = row_df.get_columns().len();
     match nobs_cols {
         1 => row_df.set_column_names(["barcodes"])?,
         3 => row_df.set_column_names(["barcodes", "spot_x", "spot_y"])?,
         x => {
-            error!("quants_mat_rows.txt file should have 1 (sc/sn-RNA) or 3 columns (spatial); the provided file has {}", x);
-            bail!("quants_mat_rows.txt file should have 1 (sc/sn-RNA) or 3 columns (spatial); the provided file has {}", x);
+            error!(
+                "quants_mat_rows.txt file should have 1 (sc/sn-RNA) or 3 columns (spatial); the provided file has {}",
+                x
+            );
+            bail!(
+                "quants_mat_rows.txt file should have 1 (sc/sn-RNA) or 3 columns (spatial); the provided file has {}",
+                x
+            );
         }
     }
 
@@ -435,14 +468,30 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     feat_dump_path.push("featureDump.txt");
     let feat_parse_options =
         polars::io::csv::read::CsvParseOptions::default().with_separator(b'\t');
-    let mut feat_dump_frame = polars_io::csv::read::CsvReadOptions::default()
+    let mut feat_dump_frame = match polars_io::csv::read::CsvReadOptions::default()
         .with_parse_options(feat_parse_options)
         .with_has_header(true)
         .with_raise_if_empty(true)
-        .try_into_reader_with_file_path(Some(feat_dump_path))
+        .try_into_reader_with_file_path(Some(feat_dump_path.clone()))
         .context("could not create TSV file reader")?
         .finish()
-        .context("could not parse feature TSV file")?;
+    {
+        Ok(dframe) => dframe,
+        Err(PolarsError::NoData(estr)) => {
+            error!(
+                "error reading the feature file ({}): {:?};",
+                feat_dump_path.display(),
+                estr
+            );
+            error!(
+                "this likely indicates no barcodes were processed and written to the output --- please ensure the barcode list is properly matched to the chemistry being processed"
+            );
+            bail!("failed to construct the feature data frame.");
+        }
+        Err(err) => {
+            bail!(err);
+        }
+    };
     // add the features to the row df
     // skip the first column since it is `CB` (the cell barcode) and is
     // redundant with the cell barcode we already have in this dataframe
