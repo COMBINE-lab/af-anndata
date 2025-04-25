@@ -18,8 +18,8 @@ path = "src/lib.rs"
 [dependencies]
 anndata = "0.6.1"
 anndata-hdf5 = "0.5.0"
-anyhow = "1.0.97"
-libsw = "3.4.0"
+anyhow = "1.0.98"
+libsw = "3.5.0"
 nalgebra-sparse = { version = "0.10.0", features = ["io"] }
 polars = { version = "0.45.1", features = ["polars-io"] }
 polars-io = { version = "0.45.1", features = ["csv", "json"] }

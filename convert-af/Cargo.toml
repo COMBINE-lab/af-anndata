@@ -12,5 +12,5 @@ categories = ["science", "science::bioinformatics"]
 
 [dependencies]
 af-anndata = { version = "0.3.2", path = "../af-anndata" }
-anyhow = "1.0.97"
+anyhow = "1.0.98"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

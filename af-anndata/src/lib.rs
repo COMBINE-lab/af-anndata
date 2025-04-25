@@ -1,6 +1,6 @@
-use anndata::{AnnData, AnnDataOp, ArrayData, ArrayElemOp, reader::MMReader, s};
+use anndata::{reader::MMReader, s, AnnData, AnnDataOp, ArrayData, ArrayElemOp};
 use anndata_hdf5::H5;
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use polars::io::prelude::*;
 use polars::prelude::{CsvReadOptions, DataFrame, PolarsError, Series, SortMultipleOptions};
 use serde_json::Value;
@@ -67,7 +67,11 @@ impl CSRMatPack {
         if nset > 1 {
             bail!("The CSRMatPack has > 1 set matrix type. This should not happen");
         }
-        if t.is_some() { Ok(t) } else { Ok(None) }
+        if t.is_some() {
+            Ok(t)
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -503,7 +507,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         ("MappingRate", "mapping_rate"),
         ("DedupRate", "dedup_rate"),
         ("MeanByMax", "mean_by_max"),
-        ("NumGenesExpressed", "num_expressed"),
+        ("NumGenesExpressed", "num_genes_expressed"),
         ("NumGenesOverMean", "num_genes_over_mean"),
     ];
     for (old_name, new_name) in col_rename {
