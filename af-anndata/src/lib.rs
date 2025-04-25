@@ -264,6 +264,9 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let mut quant_path = json_path.clone();
     quant_path.push("quant.json");
 
+    let mut map_log_path = json_path.clone();
+    map_log_path.push("simpleaf_map_info.json");
+
     let alevin_path = root_path.join("alevin");
     let mut p = PathBuf::from(&alevin_path);
     p.push("quants_mat.mtx");
@@ -337,6 +340,20 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let gplf = std::fs::File::open(&gpl_path)?;
     let gpl_json: Value = serde_json::from_reader(gplf)
         .with_context(|| format!("could not parse {} as valid JSON.", gpl_path.display()))?;
+
+    let map_json: Value = if let Ok(mapf) = std::fs::File::open(&map_log_path) {
+        serde_json::from_reader(mapf)
+            .with_context(|| format!("could not parse {} as valid JSON.", gpl_path.display()))?
+    } else {
+        warn!("Could not find a simpleaf_map_info.json in the provided directory; please upgrade to the latest version of simpleaf when possible!");
+        serde_json::json!({
+            "mapper" : "file_not_found",
+            "num_mapped": 0,
+            "num_poisoned": 0,
+            "num_reads": 0,
+            "percent_mapped": 0.
+        })
+    };
 
     let usa_mode = if let Some(Value::Bool(v)) = quant_json.get("usa_mode") {
         *v
@@ -523,6 +540,9 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         .context("could not convert collate.json to string succesfully to place in uns data.")?;
     let quant_json_str = serde_json::to_string(&quant_json)
         .context("could not convert quant.json to string succesfully to place in uns data.")?;
+    let map_log_json_str = serde_json::to_string(&map_json).context(
+        "could not convert simpleaf_map_info.json to string succesfully to place in uns data.",
+    )?;
 
     // set unstructured metadata
     let uns: Vec<(String, anndata::Data)> = vec![
@@ -532,6 +552,10 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
             anndata::Data::from(collate_json_str),
         ),
         ("quant_info".to_owned(), anndata::Data::from(quant_json_str)),
+        (
+            "simpleaf_map_info".to_owned(),
+            anndata::Data::from(map_log_json_str),
+        ),
     ];
     b.set_uns(uns).context("failed to set \"uns\" data")?;
 
