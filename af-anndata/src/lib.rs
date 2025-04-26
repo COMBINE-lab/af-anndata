@@ -226,33 +226,10 @@ fn separate_usa_layers<B: anndata::Backend>(
     // populate with the gene id and gene symbol if we have it
     // otherwise just set the gene name
     if let Some(mut var_info) = var_df {
-        var_info.with_column(var1.column("gene_id")?.clone().with_name("spliced".into()))?;
-        var_info.with_column(
-            var2.column("gene_id")?
-                .clone()
-                .with_name("unspliced".into()),
-        )?;
-        var_info.with_column(
-            var3.column("gene_id")?
-                .clone()
-                .with_name("ambiguous".into()),
-        )?;
         b.set_var(var_info)?;
     } else {
         let mut temp_var = var1.clone();
         temp_var.set_column_names(["gene_id"])?;
-        temp_var.with_column(var1.column("gene_id")?.clone().with_name("spliced".into()))?;
-        temp_var.with_column(
-            var2.column("gene_id")?
-                .clone()
-                .with_name("unspliced".into()),
-        )?;
-        temp_var.with_column(
-            var3.column("gene_id")?
-                .clone()
-                .with_name("ambiguous".into()),
-        )?;
-
         b.set_var(temp_var)?;
     }
 
