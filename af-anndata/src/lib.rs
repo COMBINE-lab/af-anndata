@@ -192,22 +192,6 @@ fn separate_usa_layers<B: anndata::Backend>(
     // 1/3 of the number of features
     let ngenes = nc / 3;
 
-    /*
-    let mut gene_ids: Vec<String> = col_df
-        .column("gene_id")?
-        .str()
-        .unwrap()
-        .iter()
-        .flatten()
-        .take(ngenes)
-        .map(|s| s.to_string())
-        .collect();
-    gene_ids.extend_from_within(..ngenes);
-    gene_ids.extend_from_within(..ngenes);
-    let var_index = DataFrameIndex::from(gene_ids);
-    b.set_var_names(var_index.clone())?;
-    */
-
     let mut csr_zero = CSRMatPack::new(nr, ngenes);
 
     // Get the unspliced, spliced and ambiguous slices
@@ -271,17 +255,6 @@ fn separate_usa_layers<B: anndata::Backend>(
 
         b.set_var(temp_var)?;
     }
-    let gene_ids: Vec<String> = col_df
-        .column("gene_id")?
-        .str()
-        .unwrap()
-        .iter()
-        .flatten()
-        .take(ngenes)
-        .map(|s| s.to_string())
-        .collect();
-    let var_index = DataFrameIndex::from(gene_ids);
-    b.set_var_names(var_index)?;
 
     let layers = vec![
         ("spliced".to_owned(), slice1),
@@ -289,15 +262,17 @@ fn separate_usa_layers<B: anndata::Backend>(
         ("ambiguous".to_owned(), slice3),
     ];
 
+    /*
     let varm = vec![
         ("spliced".to_owned(), var1),
         ("unspliced".to_owned(), var2),
         ("ambiguous".to_owned(), var3),
     ];
+    b.set_varm(varm)?;
+    */
     b.set_layers(layers)
         .context("unable to set layers for AnnData object")?;
     info!("setting layers took {:#?}", sw.elapsed());
-    //b.set_varm(varm)?;
     b.set_obs(row_df.clone())?;
 
     Ok(())
@@ -623,18 +598,19 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
             b.set_var(col_df.clone())?;
         }
         b.set_obs(row_df.clone())?;
-        let gene_ids: Vec<String> = col_df
-            .column("gene_id")?
-            .str()
-            .unwrap()
-            .iter()
-            .flatten()
-            .take(ngenes)
-            .map(|s| s.to_string())
-            .collect();
-        let var_index = DataFrameIndex::from(gene_ids);
-        b.set_var_names(var_index)?;
     }
+
+    let gene_ids: Vec<String> = col_df
+        .column("gene_id")?
+        .str()
+        .unwrap()
+        .iter()
+        .flatten()
+        .take(ngenes)
+        .map(|s| s.to_string())
+        .collect();
+    let var_index = DataFrameIndex::from(gene_ids);
+    b.set_var_names(var_index)?;
 
     let barcodes: Vec<String> = row_df
         .column("barcodes")?
