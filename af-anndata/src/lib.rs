@@ -207,16 +207,14 @@ fn separate_usa_layers<B: anndata::Backend>(
 
     let slice2: ArrayData = b.get_x().slice(s![.., ngenes..2 * ngenes])?.unwrap();
     csr_zero = accumulate_layer(&slice2, csr_zero)?;
-
-    let var2 = vars.slice(ngenes as i64, ngenes);
+    //let var2 = vars.slice(ngenes as i64, ngenes);
     info!("getting slice took {:#?}", sw.elapsed());
     sw.reset();
     sw.start()?;
 
     let slice3: ArrayData = b.get_x().slice(s![.., 2 * ngenes..3 * ngenes])?.unwrap();
     csr_zero = accumulate_layer(&slice3, csr_zero)?;
-
-    let var3 = vars.slice(2_i64 * ngenes as i64, ngenes);
+    //let var3 = vars.slice(2_i64 * ngenes as i64, ngenes);
     info!("getting slice took {:#?}", sw.elapsed());
     sw.reset();
     sw.start()?;
@@ -225,7 +223,7 @@ fn separate_usa_layers<B: anndata::Backend>(
 
     // populate with the gene id and gene symbol if we have it
     // otherwise just set the gene name
-    if let Some(mut var_info) = var_df {
+    if let Some(var_info) = var_df {
         b.set_var(var_info)?;
     } else {
         let mut temp_var = var1.clone();
@@ -238,15 +236,6 @@ fn separate_usa_layers<B: anndata::Backend>(
         ("unspliced".to_owned(), slice2),
         ("ambiguous".to_owned(), slice3),
     ];
-
-    /*
-    let varm = vec![
-        ("spliced".to_owned(), var1),
-        ("unspliced".to_owned(), var2),
-        ("ambiguous".to_owned(), var3),
-    ];
-    b.set_varm(varm)?;
-    */
     b.set_layers(layers)
         .context("unable to set layers for AnnData object")?;
     info!("setting layers took {:#?}", sw.elapsed());
