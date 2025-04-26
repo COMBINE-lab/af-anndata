@@ -1,3 +1,4 @@
+use anndata::data::array::dataframe::DataFrameIndex;
 use anndata::{reader::MMReader, s, AnnData, AnnDataOp, ArrayData, ArrayElemOp};
 use anndata_hdf5::H5;
 use anyhow::{bail, Context};
@@ -139,6 +140,7 @@ fn set_x_layer<B: anndata::Backend>(b: &mut AnnData<B>, csr_in: CSRMatPack) -> a
     b.del_obs()?;
     b.set_n_obs(csr_in.ncells())
         .context("unable to set n_obs")?;
+    //b.del_var()?;
     b.set_n_vars(csr_in.ngenes())
         .context("unable to set n_vars")?;
     // set the new X
@@ -176,9 +178,9 @@ fn set_x_layer<B: anndata::Backend>(b: &mut AnnData<B>, csr_in: CSRMatPack) -> a
 }
 
 fn separate_usa_layers<B: anndata::Backend>(
-    mut b: AnnData<B>,
-    row_df: DataFrame,
-    col_df: DataFrame,
+    b: &mut AnnData<B>,
+    row_df: &DataFrame,
+    col_df: &DataFrame,
     var_df: Option<DataFrame>,
 ) -> anyhow::Result<()> {
     let mut sw = libsw::Sw::new();
@@ -189,6 +191,22 @@ fn separate_usa_layers<B: anndata::Backend>(
     // if USA mode then the number of genes is
     // 1/3 of the number of features
     let ngenes = nc / 3;
+
+    /*
+    let mut gene_ids: Vec<String> = col_df
+        .column("gene_id")?
+        .str()
+        .unwrap()
+        .iter()
+        .flatten()
+        .take(ngenes)
+        .map(|s| s.to_string())
+        .collect();
+    gene_ids.extend_from_within(..ngenes);
+    gene_ids.extend_from_within(..ngenes);
+    let var_index = DataFrameIndex::from(gene_ids);
+    b.set_var_names(var_index.clone())?;
+    */
 
     let mut csr_zero = CSRMatPack::new(nr, ngenes);
 
@@ -219,17 +237,51 @@ fn separate_usa_layers<B: anndata::Backend>(
     sw.reset();
     sw.start()?;
 
-    set_x_layer(&mut b, csr_zero)?;
+    set_x_layer(b, csr_zero)?;
 
     // populate with the gene id and gene symbol if we have it
     // otherwise just set the gene name
-    if let Some(var_info) = var_df {
+    if let Some(mut var_info) = var_df {
+        var_info.with_column(var1.column("gene_id")?.clone().with_name("spliced".into()))?;
+        var_info.with_column(
+            var2.column("gene_id")?
+                .clone()
+                .with_name("unspliced".into()),
+        )?;
+        var_info.with_column(
+            var3.column("gene_id")?
+                .clone()
+                .with_name("ambiguous".into()),
+        )?;
         b.set_var(var_info)?;
     } else {
         let mut temp_var = var1.clone();
         temp_var.set_column_names(["gene_id"])?;
+        temp_var.with_column(var1.column("gene_id")?.clone().with_name("spliced".into()))?;
+        temp_var.with_column(
+            var2.column("gene_id")?
+                .clone()
+                .with_name("unspliced".into()),
+        )?;
+        temp_var.with_column(
+            var3.column("gene_id")?
+                .clone()
+                .with_name("ambiguous".into()),
+        )?;
+
         b.set_var(temp_var)?;
     }
+    let gene_ids: Vec<String> = col_df
+        .column("gene_id")?
+        .str()
+        .unwrap()
+        .iter()
+        .flatten()
+        .take(ngenes)
+        .map(|s| s.to_string())
+        .collect();
+    let var_index = DataFrameIndex::from(gene_ids);
+    b.set_var_names(var_index)?;
 
     let layers = vec![
         ("spliced".to_owned(), slice1),
@@ -245,8 +297,8 @@ fn separate_usa_layers<B: anndata::Backend>(
     b.set_layers(layers)
         .context("unable to set layers for AnnData object")?;
     info!("setting layers took {:#?}", sw.elapsed());
-    b.set_varm(varm)?;
-    b.set_obs(row_df)?;
+    //b.set_varm(varm)?;
+    b.set_obs(row_df.clone())?;
 
     Ok(())
 }
@@ -480,7 +532,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     };
 
     // make the AnnData object and populate it from the MMReader
-    let b = AnnData::<H5>::new(output_path.as_ref())?;
+    let mut b = AnnData::<H5>::new(output_path.as_ref())?;
     r.finish(&b)?;
     info!("Reading MM into AnnData took {:#?}", sw.elapsed());
 
@@ -559,15 +611,40 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     ];
     b.set_uns(uns).context("failed to set \"uns\" data")?;
 
+    let ngenes;
     if usa_mode {
-        separate_usa_layers(b, row_df, col_df, var_df)?;
+        ngenes = b.n_vars() / 3;
+        separate_usa_layers(&mut b, &row_df, &col_df, var_df)?;
     } else {
+        ngenes = b.n_vars();
         if let Some(var_info) = var_df {
             b.set_var(var_info)?;
         } else {
-            b.set_var(col_df)?;
+            b.set_var(col_df.clone())?;
         }
-        b.set_obs(row_df)?;
+        b.set_obs(row_df.clone())?;
+        let gene_ids: Vec<String> = col_df
+            .column("gene_id")?
+            .str()
+            .unwrap()
+            .iter()
+            .flatten()
+            .take(ngenes)
+            .map(|s| s.to_string())
+            .collect();
+        let var_index = DataFrameIndex::from(gene_ids);
+        b.set_var_names(var_index)?;
     }
+
+    let barcodes: Vec<String> = row_df
+        .column("barcodes")?
+        .str()
+        .unwrap()
+        .iter()
+        .flatten()
+        .map(|s| s.to_string())
+        .collect();
+    let obs_index = DataFrameIndex::from(barcodes);
+    b.set_obs_names(obs_index)?;
     Ok(())
 }
