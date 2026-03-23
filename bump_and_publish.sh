@@ -55,8 +55,21 @@ replace_dep_version() {
     local dep="$2"
     local version="$3"
     if [[ "$DRY_RUN" == false ]]; then
-        perl -0pi.bak -e "s/(\\Q${dep}\\E\\s*=\\s*\\{[^\\n]*version\\s*=\\s*\")[^\"]+(\")/\$1${version}\$2/" "$file"
-        rm -f "${file}.bak"
+        python3 - "$file" "$dep" "$version" <<'PY'
+import pathlib
+import re
+import sys
+
+file_path = pathlib.Path(sys.argv[1])
+dep = sys.argv[2]
+version = sys.argv[3]
+text = file_path.read_text()
+pattern = rf'^({re.escape(dep)}\s*=\s*\{{[^\n]*\bversion\s*=\s*")[^"]+(")'
+updated, count = re.subn(pattern, rf'\g<1>{version}\2', text, count=1, flags=re.MULTILINE)
+if count != 1:
+    raise SystemExit(f"error: failed to update dependency version for {dep} in {file_path}")
+file_path.write_text(updated)
+PY
     fi
 }
 
