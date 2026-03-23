@@ -77,6 +77,7 @@ CRATE=""
 VERSION=""
 PUBLISH=false
 DRY_RUN=false
+declare -a EXTRA_FILES=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -189,7 +190,11 @@ else
 fi
 
 run cargo check -q
-run git add "$CARGO_TOML" "${EXTRA_FILES[@]}"
+if [[ ${#EXTRA_FILES[@]} -gt 0 ]]; then
+    run git add "$CARGO_TOML" "${EXTRA_FILES[@]}"
+else
+    run git add "$CARGO_TOML"
+fi
 run git add -f "$LOCKFILE"
 run git commit -m "chore(release): bump ${CRATE} to v${VERSION}"
 
