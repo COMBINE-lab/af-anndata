@@ -189,7 +189,8 @@ else
 fi
 
 run cargo check -q
-run git add "$CARGO_TOML" "$LOCKFILE" "${EXTRA_FILES[@]}"
+run git add "$CARGO_TOML" "${EXTRA_FILES[@]}"
+run git add -f "$LOCKFILE"
 run git commit -m "chore(release): bump ${CRATE} to v${VERSION}"
 
 if [[ "$PUBLISH" == true ]]; then
