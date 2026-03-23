@@ -244,6 +244,19 @@ fn separate_usa_layers<B: anndata::Backend>(
     Ok(())
 }
 
+fn parse_multiplex_barcodes(obs_names: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+    let mut sample_names = Vec::with_capacity(obs_names.len());
+    let mut cell_barcodes = Vec::with_capacity(obs_names.len());
+
+    for obs_name in obs_names {
+        let (sample_name, cell_barcode) = obs_name.rsplit_once('_')?;
+        sample_names.push(sample_name.to_string());
+        cell_barcodes.push(cell_barcode.to_string());
+    }
+
+    Some((sample_names, cell_barcodes))
+}
+
 pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> anyhow::Result<()> {
     let root_path = root_path.as_ref();
     let json_path = PathBuf::from(&root_path);
@@ -259,6 +272,12 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
 
     let mut map_log_path = json_path.clone();
     map_log_path.push("simpleaf_map_info.json");
+
+    let mut multiplex_info_path = json_path.clone();
+    multiplex_info_path.push("simpleaf_multiplex_quant_info.json");
+
+    let mut sample_info_path = json_path.clone();
+    sample_info_path.push("sample_info.json");
 
     let alevin_path = root_path.join("alevin");
     let mut p = PathBuf::from(&alevin_path);
@@ -334,6 +353,30 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let gpl_json: Value = serde_json::from_reader(gplf)
         .with_context(|| format!("could not parse {} as valid JSON.", gpl_path.display()))?;
 
+    let sample_info_json: Option<Value> = if let Ok(sample_info_file) = std::fs::File::open(&sample_info_path) {
+        Some(
+            serde_json::from_reader(sample_info_file).with_context(|| {
+                format!("could not parse {} as valid JSON.", sample_info_path.display())
+            })?,
+        )
+    } else {
+        None
+    };
+
+    let multiplex_info_json: Option<Value> =
+        if let Ok(multiplex_info_file) = std::fs::File::open(&multiplex_info_path) {
+            Some(
+                serde_json::from_reader(multiplex_info_file).with_context(|| {
+                    format!(
+                        "could not parse {} as valid JSON.",
+                        multiplex_info_path.display()
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+
     let map_json: Value = if let Ok(mapf) = std::fs::File::open(&map_log_path) {
         serde_json::from_reader(mapf)
             .with_context(|| format!("could not parse {} as valid JSON.", gpl_path.display()))?
@@ -353,6 +396,11 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     } else {
         false
     };
+    let is_multi_barcode = collate_json
+        .get("multi_barcode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || sample_info_json.is_some();
 
     info!("USA mode : {}", usa_mode);
 
@@ -417,6 +465,14 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
             );
         }
     }
+    let obs_barcodes: Vec<String> = row_df
+        .column("barcodes")?
+        .str()
+        .unwrap()
+        .iter()
+        .flatten()
+        .map(|s| s.to_string())
+        .collect();
 
     // read the gene_id_to_name file
     let var_df = if let Some(id_to_name) = gene_id_to_name_path {
@@ -523,7 +579,39 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     for (old_name, new_name) in col_rename {
         feat_dump_frame.rename(old_name, new_name.into())?;
     }
-    let row_df = row_df.hstack(&feat_dump_frame.take_columns()[1..])?;
+    let has_sample_name = feat_dump_frame
+        .get_columns()
+        .iter()
+        .any(|c| c.name().as_str() == "sample_name");
+    let has_cb = feat_dump_frame
+        .get_columns()
+        .iter()
+        .any(|c| c.name().as_str() == "CB");
+
+    if is_multi_barcode {
+        if has_cb {
+            feat_dump_frame.rename("CB", "cell_barcode".into())?;
+        }
+        if let Some((sample_names, cell_barcodes)) = parse_multiplex_barcodes(&obs_barcodes) {
+            if !has_sample_name {
+                feat_dump_frame.with_column(Series::from_iter(sample_names).with_name("sample_name".into()))?;
+            }
+            if !has_cb {
+                feat_dump_frame.with_column(
+                    Series::from_iter(cell_barcodes).with_name("cell_barcode".into()),
+                )?;
+            }
+        } else if !has_sample_name {
+            warn!(
+                "Could not derive multiplex sample_name/cell_barcode columns from obs names; expected values like SAMPLE_BARCODE."
+            );
+        }
+    }
+    let row_df = if is_multi_barcode {
+        row_df.hstack(&feat_dump_frame.take_columns())?
+    } else {
+        row_df.hstack(&feat_dump_frame.take_columns()[1..])?
+    };
 
     // read in the quant JSON file
     let gpl_json_str = serde_json::to_string(&gpl_json).context(
@@ -536,9 +624,24 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let map_log_json_str = serde_json::to_string(&map_json).context(
         "could not convert simpleaf_map_info.json to string succesfully to place in uns data.",
     )?;
+    let sample_info_json_str = sample_info_json
+        .as_ref()
+        .map(|v| {
+            serde_json::to_string(v)
+                .context("could not convert sample_info.json to string succesfully to place in uns data.")
+        })
+        .transpose()?;
+    let multiplex_info_json_str = multiplex_info_json
+        .as_ref()
+        .map(|v| {
+            serde_json::to_string(v).context(
+                "could not convert simpleaf_multiplex_quant_info.json to string succesfully to place in uns data.",
+            )
+        })
+        .transpose()?;
 
     // set unstructured metadata
-    let uns: Vec<(String, anndata::Data)> = vec![
+    let mut uns: Vec<(String, anndata::Data)> = vec![
         ("gpl_info".to_owned(), anndata::Data::from(gpl_json_str)),
         (
             "collate_info".to_owned(),
@@ -550,6 +653,18 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
             anndata::Data::from(map_log_json_str),
         ),
     ];
+    if let Some(sample_info_json_str) = sample_info_json_str {
+        uns.push((
+            "sample_info".to_owned(),
+            anndata::Data::from(sample_info_json_str),
+        ));
+    }
+    if let Some(multiplex_info_json_str) = multiplex_info_json_str {
+        uns.push((
+            "simpleaf_multiplex_quant_info".to_owned(),
+            anndata::Data::from(multiplex_info_json_str),
+        ));
+    }
     b.set_uns(uns).context("failed to set \"uns\" data")?;
 
     let ngenes;
@@ -578,15 +693,24 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let var_index = DataFrameIndex::from(gene_ids);
     b.set_var_names(var_index)?;
 
-    let barcodes: Vec<String> = row_df
-        .column("barcodes")?
-        .str()
-        .unwrap()
-        .iter()
-        .flatten()
-        .map(|s| s.to_string())
-        .collect();
-    let obs_index = DataFrameIndex::from(barcodes);
+    let obs_index = DataFrameIndex::from(obs_barcodes);
     b.set_obs_names(obs_index)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_multiplex_barcodes;
+
+    #[test]
+    fn multiplex_barcodes_split_from_right() {
+        let obs = vec![
+            "sample_one_AAACCTGAGT".to_string(),
+            "sample_two_TTGGAACCGA".to_string(),
+        ];
+        let (sample_names, cell_barcodes) =
+            parse_multiplex_barcodes(&obs).expect("should parse multiplex barcodes");
+        assert_eq!(sample_names, vec!["sample_one", "sample_two"]);
+        assert_eq!(cell_barcodes, vec!["AAACCTGAGT", "TTGGAACCGA"]);
+    }
 }
