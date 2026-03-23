@@ -3,9 +3,13 @@ use anndata::{reader::MMReader, s, AnnData, AnnDataOp, ArrayData, ArrayElemOp};
 use anndata_hdf5::H5;
 use anyhow::{bail, Context};
 use polars::io::prelude::*;
-use polars::prelude::{CsvReadOptions, DataFrame, PolarsError, Series, SortMultipleOptions};
+use polars::prelude::{
+    CsvReadOptions, DataFrame, DataType, Field, PolarsError, Schema, Series,
+    SortMultipleOptions,
+};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{error, info, trace, warn};
 
 /// Tags the actual type of matrix that has
@@ -538,9 +542,20 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     feat_dump_path.push("featureDump.txt");
     let feat_parse_options =
         polars::io::csv::read::CsvParseOptions::default().with_separator(b'\t');
+    let feat_dump_schema = Arc::new(Schema::from_iter([
+        Field::new("CorrectedReads".into(), DataType::Int64),
+        Field::new("MappedReads".into(), DataType::Int64),
+        Field::new("DeduplicatedReads".into(), DataType::Int64),
+        Field::new("MappingRate".into(), DataType::Float64),
+        Field::new("DedupRate".into(), DataType::Float64),
+        Field::new("MeanByMax".into(), DataType::Float64),
+        Field::new("NumGenesExpressed".into(), DataType::Int64),
+        Field::new("NumGenesOverMean".into(), DataType::Int64),
+    ]));
     let mut feat_dump_frame = match polars_io::csv::read::CsvReadOptions::default()
         .with_parse_options(feat_parse_options)
         .with_has_header(true)
+        .with_schema_overwrite(Some(feat_dump_schema))
         .with_raise_if_empty(true)
         .try_into_reader_with_file_path(Some(feat_dump_path.clone()))
         .context("could not create TSV file reader")?
