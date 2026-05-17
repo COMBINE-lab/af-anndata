@@ -545,7 +545,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let feat_dump_schema = Arc::new(Schema::from_iter([
         Field::new("CorrectedReads".into(), DataType::Int64),
         Field::new("MappedReads".into(), DataType::Int64),
-        Field::new("DeduplicatedReads".into(), DataType::Int64),
+        Field::new("DeduplicatedReads".into(), DataType::Float64),
         Field::new("MappingRate".into(), DataType::Float64),
         Field::new("DedupRate".into(), DataType::Float64),
         Field::new("MeanByMax".into(), DataType::Float64),
