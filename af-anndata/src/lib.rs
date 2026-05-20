@@ -542,7 +542,17 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     feat_dump_path.push("featureDump.txt");
     let feat_parse_options =
         polars::io::csv::read::CsvParseOptions::default().with_separator(b'\t');
+    // Defense-in-depth: pin `CB` and `sample_name` to String explicitly.
+    // Without these, Polars auto-infers their dtype from the first N rows
+    // — if a multi-sample run ever produces malformed mixed-width rows
+    // (see COMBINE-lab/simpleaf#195), `sample_name` would infer as Int64
+    // from the integers leaking up from the next column and crash on
+    // the first real well name like "A-A01".  `with_schema_overwrite`
+    // only applies entries that match real columns, so the `sample_name`
+    // entry is a no-op in single-sample runs.
     let feat_dump_schema = Arc::new(Schema::from_iter([
+        Field::new("CB".into(), DataType::String),
+        Field::new("sample_name".into(), DataType::String),
         Field::new("CorrectedReads".into(), DataType::Int64),
         Field::new("MappedReads".into(), DataType::Int64),
         Field::new("DeduplicatedReads".into(), DataType::Float64),
