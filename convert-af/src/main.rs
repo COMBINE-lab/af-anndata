@@ -1,22 +1,39 @@
-use af_anndata::convert_csr_to_anndata;
-use anyhow::{anyhow, bail};
-use std::env;
-use std::path::Path;
+//! `convert-af` converts a [simpleaf]/[alevin-fry] `af_quant` output directory
+//! into a single HDF5-backed [AnnData] (`.h5ad`) file.
+//!
+//! [simpleaf]: https://github.com/COMBINE-lab/simpleaf
+//! [alevin-fry]: https://github.com/COMBINE-lab/alevin-fry
+//! [AnnData]: https://anndata.readthedocs.io/en/stable/
+
+use af_anndata::{convert_csr_to_anndata_with_opts, ConvertOpts};
+use clap::Parser;
+use std::path::PathBuf;
 use tracing_subscriber::fmt;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// The input `af_quant` directory produced by simpleaf / alevin-fry
+    input: PathBuf,
+
+    /// The output AnnData (`.h5ad`) file to write
+    output: PathBuf,
+
+    /// Sort `obs` and `var` by their index (cell barcode and gene id) before
+    /// writing. The output is a pure permutation of the unsorted result, which
+    /// makes it directly comparable across runs.
+    #[arg(long)]
+    sort_index: bool,
+}
 
 fn main() -> anyhow::Result<()> {
     fmt::fmt().init();
-    if env::args().len() != 3 {
-        eprintln!(
-            "usage: {} <input af_quant directory> <output anndata file>",
-            env::args().next().expect("program name shuold be present")
-        );
-        return Ok(());
-    }
-    let d = env::args().nth(1).expect("input expected");
-    let opath = env::args().nth(2).expect("input expected");
-
-    let p = std::path::Path::new(&d);
-    let o = std::path::Path::new(&opath);
-    convert_csr_to_anndata(p, o)
+    let cli = Cli::parse();
+    convert_csr_to_anndata_with_opts(
+        cli.input.as_path(),
+        cli.output.as_path(),
+        ConvertOpts {
+            sort_index: cli.sort_index,
+        },
+    )
 }

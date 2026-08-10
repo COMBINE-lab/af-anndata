@@ -4,7 +4,7 @@ use anndata_hdf5::H5;
 use anyhow::{bail, Context};
 use polars::io::prelude::*;
 use polars::prelude::{
-    CsvReadOptions, DataFrame, DataType, Field, PolarsError, Schema, Series,
+    Column, CsvReadOptions, DataFrame, DataType, Field, IntoColumn, PolarsError, Schema, Series,
     SortMultipleOptions,
 };
 use serde_json::Value;
@@ -231,7 +231,7 @@ fn separate_usa_layers<B: anndata::Backend>(
         b.set_var(var_info)?;
     } else {
         let mut temp_var = var1.clone();
-        temp_var.set_column_names(["gene_id"])?;
+        temp_var.set_column_names(&["gene_id"])?;
         b.set_var(temp_var)?;
     }
 
@@ -261,7 +261,33 @@ fn parse_multiplex_barcodes(obs_names: &[String]) -> Option<(Vec<String>, Vec<St
     Some((sample_names, cell_barcodes))
 }
 
+/// Options controlling how an `af_quant` directory is converted to AnnData.
+///
+/// This is a struct rather than extra parameters so that new knobs can be added
+/// without breaking callers; construct it with `..Default::default()`.
+#[derive(Debug, Clone, Default)]
+pub struct ConvertOpts {
+    /// Sort `obs` and `var` by their index (barcode and gene id, respectively)
+    /// before writing. The result is a pure permutation of the unsorted output --
+    /// `X`, every layer, and the `obs`/`var` annotations are all permuted
+    /// together. Useful for producing byte-comparable output across runs, e.g.
+    /// in CI. See COMBINE-lab/af-anndata#1.
+    pub sort_index: bool,
+}
+
+/// Convert an `af_quant` directory to an HDF5-backed AnnData file using default options.
+///
+/// Equivalent to [`convert_csr_to_anndata_with_opts`] with [`ConvertOpts::default`].
 pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> anyhow::Result<()> {
+    convert_csr_to_anndata_with_opts(root_path, output_path, ConvertOpts::default())
+}
+
+/// Convert an `af_quant` directory to an HDF5-backed AnnData file.
+pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
+    root_path: P,
+    output_path: P,
+    opts: ConvertOpts,
+) -> anyhow::Result<()> {
     let root_path = root_path.as_ref();
     let json_path = PathBuf::from(&root_path);
 
@@ -357,15 +383,17 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let gpl_json: Value = serde_json::from_reader(gplf)
         .with_context(|| format!("could not parse {} as valid JSON.", gpl_path.display()))?;
 
-    let sample_info_json: Option<Value> = if let Ok(sample_info_file) = std::fs::File::open(&sample_info_path) {
-        Some(
-            serde_json::from_reader(sample_info_file).with_context(|| {
-                format!("could not parse {} as valid JSON.", sample_info_path.display())
-            })?,
-        )
-    } else {
-        None
-    };
+    let sample_info_json: Option<Value> =
+        if let Ok(sample_info_file) = std::fs::File::open(&sample_info_path) {
+            Some(serde_json::from_reader(sample_info_file).with_context(|| {
+                format!(
+                    "could not parse {} as valid JSON.",
+                    sample_info_path.display()
+                )
+            })?)
+        } else {
+            None
+        };
 
     let multiplex_info_json: Option<Value> =
         if let Ok(multiplex_info_file) = std::fs::File::open(&multiplex_info_path) {
@@ -431,7 +459,7 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
             bail!(err);
         }
     };
-    col_df.set_column_names(["gene_id"])?;
+    col_df.set_column_names(&["gene_id"])?;
 
     // read the barcodes
     let mut row_df = match CsvReadOptions::default()
@@ -454,10 +482,10 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         }
     };
 
-    let nobs_cols = row_df.get_columns().len();
+    let nobs_cols = row_df.columns().len();
     match nobs_cols {
-        1 => row_df.set_column_names(["barcodes"])?,
-        3 => row_df.set_column_names(["barcodes", "spot_x", "spot_y"])?,
+        1 => row_df.set_column_names(&["barcodes"])?,
+        3 => row_df.set_column_names(&["barcodes", "spot_x", "spot_y"])?,
         x => {
             error!(
                 "quants_mat_rows.txt file should have 1 (sc/sn-RNA) or 3 columns (spatial); the provided file has {}",
@@ -519,9 +547,9 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
                 }),
         );
         // add the rank column to the Data Frame
-        vd.with_column(rank_vec)?;
+        vd.with_column(rank_vec.into_column())?;
         // set the column names
-        vd.set_column_names(["gene_id", "gene_symbol", "gene_rank"])?;
+        vd.set_column_names(&["gene_id", "gene_symbol", "gene_rank"])?;
         // reorder the rows to put the ranks in order, bringing the ids and names
         // with them.
         vd.sort_in_place(["gene_rank"], SortMultipleOptions::default())?;
@@ -605,11 +633,11 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         feat_dump_frame.rename(old_name, new_name.into())?;
     }
     let has_sample_name = feat_dump_frame
-        .get_columns()
+        .columns()
         .iter()
         .any(|c| c.name().as_str() == "sample_name");
     let has_cb = feat_dump_frame
-        .get_columns()
+        .columns()
         .iter()
         .any(|c| c.name().as_str() == "CB");
 
@@ -619,12 +647,10 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         }
         if let Some((sample_names, cell_barcodes)) = parse_multiplex_barcodes(&obs_barcodes) {
             if !has_sample_name {
-                feat_dump_frame.with_column(Series::from_iter(sample_names).with_name("sample_name".into()))?;
+                feat_dump_frame.with_column(Column::new("sample_name".into(), sample_names))?;
             }
             if !has_cb {
-                feat_dump_frame.with_column(
-                    Series::from_iter(cell_barcodes).with_name("cell_barcode".into()),
-                )?;
+                feat_dump_frame.with_column(Column::new("cell_barcode".into(), cell_barcodes))?;
             }
         } else if !has_sample_name {
             warn!(
@@ -633,9 +659,9 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         }
     }
     let row_df = if is_multi_barcode {
-        row_df.hstack(&feat_dump_frame.take_columns())?
+        row_df.hstack(&feat_dump_frame.into_columns())?
     } else {
-        row_df.hstack(&feat_dump_frame.take_columns()[1..])?
+        row_df.hstack(&feat_dump_frame.into_columns()[1..])?
     };
 
     // read in the quant JSON file
@@ -652,8 +678,9 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     let sample_info_json_str = sample_info_json
         .as_ref()
         .map(|v| {
-            serde_json::to_string(v)
-                .context("could not convert sample_info.json to string succesfully to place in uns data.")
+            serde_json::to_string(v).context(
+                "could not convert sample_info.json to string succesfully to place in uns data.",
+            )
         })
         .transpose()?;
     let multiplex_info_json_str = multiplex_info_json
@@ -715,17 +742,76 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
         .take(ngenes)
         .map(|s| s.to_string())
         .collect();
-    let var_index = DataFrameIndex::from(gene_ids);
+    let var_index = DataFrameIndex::from(gene_ids.clone());
     b.set_var_names(var_index)?;
 
-    let obs_index = DataFrameIndex::from(obs_barcodes);
+    let obs_index = DataFrameIndex::from(obs_barcodes.clone());
     b.set_obs_names(obs_index)?;
+
+    if opts.sort_index {
+        sort_by_index(&b, &obs_barcodes, &gene_ids)?;
+    }
+
+    Ok(())
+}
+
+/// Returns the permutation that sorts `keys` ascending, i.e. `argsort(keys)`.
+fn argsort(keys: &[String]) -> Vec<usize> {
+    let mut perm: Vec<usize> = (0..keys.len()).collect();
+    perm.sort_by(|&a, &b| keys[a].cmp(&keys[b]));
+    perm
+}
+
+/// Reorders `b` so that `obs` is sorted by barcode and `var` by gene id.
+///
+/// `AnnData::subset` permutes `X`, `layers`, `obs`/`var` and the `obsm`/`obsp`/
+/// `varm`/`varp` collections together, so the result is a pure permutation: the
+/// same values, reachable under the same labels, in sorted order.
+fn sort_by_index<B: anndata::Backend>(
+    b: &AnnData<B>,
+    obs_barcodes: &[String],
+    gene_ids: &[String],
+) -> anyhow::Result<()> {
+    use anndata::data::SelectInfoElem;
+
+    let obs_perm = argsort(obs_barcodes);
+    let var_perm = argsort(gene_ids);
+
+    // Nothing to do if both axes are already ordered; `subset` is not free.
+    let sorted = |p: &[usize]| p.windows(2).all(|w| w[0] < w[1]);
+    if sorted(&obs_perm) && sorted(&var_perm) {
+        info!("obs and var are already sorted by index; skipping the sort");
+        return Ok(());
+    }
+
+    info!("sorting obs and var by index");
+    let selection: Vec<SelectInfoElem> = vec![obs_perm.into(), var_perm.into()];
+    b.subset(selection.as_slice())
+        .context("unable to sort the AnnData object by obs/var index")?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_multiplex_barcodes;
+    use super::{argsort, parse_multiplex_barcodes};
+
+    #[test]
+    fn argsort_orders_by_key_not_position() {
+        let keys: Vec<String> = ["TTT", "AAA", "GGG", "CCC"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let perm = argsort(&keys);
+        assert_eq!(perm, vec![1, 3, 2, 0]);
+        let applied: Vec<&String> = perm.iter().map(|&i| &keys[i]).collect();
+        assert_eq!(applied, vec!["AAA", "CCC", "GGG", "TTT"]);
+    }
+
+    #[test]
+    fn argsort_of_sorted_input_is_the_identity() {
+        let keys: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(argsort(&keys), vec![0, 1, 2]);
+    }
 
     #[test]
     fn multiplex_barcodes_split_from_right() {

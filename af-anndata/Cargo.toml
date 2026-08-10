@@ -2,6 +2,7 @@
 name = "af-anndata"
 version = "0.4.3"
 edition = "2021"
+rust-version = "1.88"
 license-file = "LICENSE"
 description = "A library for converting alevin-fry output to the AnnData format"
 homepage = "https://github.com/COMBINE-lab/af-anndata"
@@ -16,12 +17,18 @@ name = "af_anndata"
 path = "src/lib.rs"
 
 [dependencies]
-anndata = "0.6.1"
-anndata-hdf5 = "0.5.0"
+anndata = "0.7.0"
+anndata-hdf5 = "0.5.3"
 anyhow = "1.0.98"
 libsw = "3.5.0"
-nalgebra-sparse = { version = "0.10.0", features = ["io"] }
-polars = { version = "0.45.1", features = ["polars-io"] }
-polars-io = { version = "0.45.1", features = ["csv", "json"] }
+# NOTE: `nalgebra-sparse` and `polars` must match the versions `anndata` itself
+# depends on, *exactly*. `CsrMatrix` and `DataFrame` cross the anndata API
+# boundary and anndata does not re-export either crate, so any skew resolves to
+# two nominally-distinct types and fails with "expected CsrMatrix, found
+# CsrMatrix" (see COMBINE-lab/af-anndata#2). anndata 0.7.0 requires
+# nalgebra-sparse ^0.11 and polars ^0.53 -- do not "upgrade" these past that.
+nalgebra-sparse = { version = "0.11", features = ["io"] }
+polars = { version = "0.53", features = ["polars-io"] }
+polars-io = { version = "0.53", features = ["csv", "json"] }
 serde_json = "1.0.140"
 tracing = "0.1.41"
