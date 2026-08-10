@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [conventional commits](https://www.conventionalcommits.org); entries are
 generated from commit messages by [git-cliff](https://git-cliff.org).
 
+## [af-anndata-v0.5.1](https://github.com/COMBINE-lab/af-anndata/compare/af-anndata-v0.5.0...af-anndata-v0.5.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* Request the zlib-rs flate2 backend explicitly ([9fbb851](https://github.com/COMBINE-lab/af-anndata/commit/9fbb851b6819ebf4c351a3f8d327128d37987d76))
+
 ## [af-anndata-v0.5.0](https://github.com/COMBINE-lab/af-anndata/compare/af-anndata-v0.4.3...af-anndata-v0.5.0) (2026-08-10)
 
 

@@ -12,7 +12,7 @@ keywords = ["anndata", "single-cell", "genomics"]
 categories = ["science", "science::bioinformatics"]
 
 [dependencies]
-af-anndata = { version = "0.5.0", path = "../af-anndata" }
+af-anndata = { version = "0.5.1", path = "../af-anndata" }
 anyhow = "1.0.98"
 # Pins the flate2 backend for the binary; see the note in af-anndata/Cargo.toml.
 flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
