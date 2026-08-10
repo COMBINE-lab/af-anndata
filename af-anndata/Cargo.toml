@@ -30,5 +30,25 @@ libsw = "3.5.0"
 nalgebra-sparse = { version = "0.11", features = ["io"] }
 polars = { version = "0.53", features = ["polars-io"] }
 polars-io = { version = "0.53", features = ["csv", "json"] }
+# Not used in our code -- declared solely to hold a transitive dependency at a
+# version that builds. `anndata-hdf5` enables hdf5-metno-sys's `static` feature
+# unconditionally, so HDF5 is always compiled from the sources this crate
+# vendors; there is no configuration in which pinning it costs an extra build.
+#
+# hdf5-metno-src 0.10.3 vendors HDF5 2.2.0, and two separate upstream bugs make
+# that unusable here:
+#   1. hdf5-metno-sys 0.11.3's build script only accepts HDF5 minor versions
+#      {0,1,8,10,12,14}, so it panics with `Invalid H5_VERSION: "2.2.0"`.
+#      Fixed in hdf5-metno-sys 0.12.2, which we cannot reach: anndata-hdf5
+#      0.5.3 requires hdf5-metno-sys ^0.11 *and* hdf5-metno ^0.12.3, while any
+#      hdf5-metno >= 0.12.6 wants hdf5-metno-sys ^0.12. Since that crate sets
+#      `links = "hdf5"`, cargo refuses the two copies outright.
+#   2. Even with anndata-hdf5 patched to hdf5-metno 0.14 + sys 0.12.1 (which
+#      resolves), the static build still fails on RHEL-family hosts: HDF5 2.x
+#      installs to `<root>/lib64`, but the build script hardcodes `<root>/lib`,
+#      giving `could not find native static library hdf5`.
+# 0.10.2 vendors HDF5 1.x, installs to `lib/`, and passes the version check.
+# Revisit once both are fixed upstream.
+hdf5-metno-src = "=0.10.2"
 serde_json = "1.0.140"
 tracing = "0.1.41"

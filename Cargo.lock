@@ -15,6 +15,7 @@ dependencies = [
  "anndata",
  "anndata-hdf5",
  "anyhow",
+ "hdf5-metno-src",
  "libsw",
  "nalgebra-sparse",
  "polars",
