@@ -21,6 +21,16 @@ anndata = "0.7.0"
 anndata-hdf5 = "0.5.3"
 anyhow = "1.0.98"
 libsw = "3.5.0"
+# af-anndata does not compress or decompress anything itself; this dependency
+# exists solely to pin the flate2 backend for the whole graph (anndata,
+# anndata-hdf5, polars-io). The alevin-fry ecosystem standardises on the
+# pure-Rust `zlib-rs`, which needs no system library and no cmake.
+#
+# NOTE: `libz-sys` will still appear in Cargo.lock. That is HDF5's own zlib
+# compression filter, pulled in by anndata-hdf5 and hdf5-metno-src, and it has
+# nothing to do with which backend flate2 uses. It cannot be removed from here.
+flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
+
 # NOTE: `nalgebra-sparse` and `polars` must match the versions `anndata` itself
 # depends on, *exactly*. `CsrMatrix` and `DataFrame` cross the anndata API
 # boundary and anndata does not re-export either crate, so any skew resolves to

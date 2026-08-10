@@ -40,6 +40,24 @@ jobs:
       - name: Run tests
         run: cargo test --locked --workspace --verbose
 
+      # The ecosystem standardises on the pure-Rust `zlib-rs` flate2 backend.
+      # NOTE: libz-sys is expected in this tree -- it is HDF5's own zlib
+      # compression filter via anndata-hdf5, not a flate2 backend -- so it is
+      # deliberately not checked for here.
+      - name: Assert the flate2 backend is zlib-rs
+        shell: bash
+        run: |
+          cargo tree -e normal --workspace > tree.txt
+          if ! grep -qE '\bzlib-rs v[0-9]' tree.txt; then
+            echo "::error::zlib-rs is not in the dependency tree; the flate2 backend pin was lost"
+            exit 1
+          fi
+          if grep -qE 'libz-ng-sys|cloudflare-zlib-sys' tree.txt; then
+            echo "::error::a non-zlib-rs flate2 backend crept into the dependency tree"
+            grep -E 'libz-ng-sys|cloudflare-zlib-sys' tree.txt
+            exit 1
+          fi
+
   # Regression test for COMBINE-lab/af-anndata#2.
   #
   # That issue was an unlocked build failing with "cannot add &CsrMatrix<i32> to

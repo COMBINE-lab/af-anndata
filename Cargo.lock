@@ -15,6 +15,7 @@ dependencies = [
  "anndata",
  "anndata-hdf5",
  "anyhow",
+ "flate2",
  "hdf5-metno-src",
  "libsw",
  "nalgebra-sparse",
@@ -561,6 +562,7 @@ dependencies = [
  "af-anndata",
  "anyhow",
  "clap",
+ "flate2",
  "tracing-subscriber",
 ]
 
