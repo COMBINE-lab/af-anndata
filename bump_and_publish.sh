@@ -9,16 +9,23 @@ die() {
 usage() {
     cat <<'EOF'
 Usage:
-  ./bump_and_publish.sh <crate> <version> [--publish] [--dry-run]
+  ./bump_and_publish.sh <crate> <version> [--publish] [--dry-run] [--no-changelog]
 
 Arguments:
   <crate>    Crate to release: af-anndata or convert-af
   <version>  New version (X.Y.Z format)
 
 Options:
-  --publish  Publish to crates.io after bumping and committing
-  --dry-run  Show what would be done without modifying anything
-  -h, --help Show this help message
+  --publish       Publish to crates.io after bumping and committing
+  --dry-run       Show what would be done without modifying anything
+  --no-changelog  Skip regenerating CHANGELOG.md (requires git-cliff otherwise)
+  -h, --help      Show this help message
+
+CHANGELOG.md is regenerated from conventional commits by git-cliff (see
+cliff.toml) and included in the release commit. Preview the section the next
+release would add, without writing anything:
+
+  git-cliff --tag af-anndata-v<version> --unreleased
 
 Examples:
   ./bump_and_publish.sh af-anndata 0.3.4 --publish
@@ -78,6 +85,7 @@ VERSION=""
 PUBLISH=false
 DRY_RUN=false
 declare -a EXTRA_FILES=()
+CHANGELOG_ENABLED=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -86,6 +94,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run)
             DRY_RUN=true
+            ;;
+        --no-changelog)
+            CHANGELOG_ENABLED=false
             ;;
         -h|--help)
             usage
@@ -136,6 +147,8 @@ case "$CRATE" in
 esac
 
 LOCKFILE="Cargo.lock"
+CHANGELOG="CHANGELOG.md"
+CLIFF_CONFIG="cliff.toml"
 
 [[ -f "$CARGO_TOML" ]] || die "not found: $CARGO_TOML"
 [[ -f "$LOCKFILE" ]] || die "not found: $LOCKFILE"
@@ -190,16 +203,33 @@ else
 fi
 
 run cargo check -q
+# The release script used to run `cargo check` and nothing else, which is how a
+# broken unlocked build reached crates.io (see issue #2).
+run cargo test -q --workspace
+
+if [[ "$CHANGELOG_ENABLED" == true ]]; then
+    [[ -f "$CLIFF_CONFIG" ]] || die "not found: $CLIFF_CONFIG (pass --no-changelog to skip changelog generation)"
+    command -v git-cliff >/dev/null 2>&1 || die "git-cliff is not installed; install it (cargo binstall git-cliff) or pass --no-changelog"
+    # Regenerate the whole file rather than prepending: the result is idempotent
+    # and stays in one format throughout. `--tag` labels the not-yet-tagged
+    # commits with the version about to be cut.
+    echo "Regenerating $CHANGELOG for $TAG"
+    run git-cliff --tag "$TAG" -o "$CHANGELOG"
+    EXTRA_FILES+=("$CHANGELOG")
+fi
+
 if [[ ${#EXTRA_FILES[@]} -gt 0 ]]; then
     run git add "$CARGO_TOML" "${EXTRA_FILES[@]}"
 else
     run git add "$CARGO_TOML"
 fi
-run git add -f "$LOCKFILE"
+run git add "$LOCKFILE"
 run git commit -m "chore(release): bump ${CRATE} to v${VERSION}"
 
 if [[ "$PUBLISH" == true ]]; then
-    run cargo publish $PUBLISH_ARGS --allow-dirty
+    # No --allow-dirty: the release commit was just made, so the tree is clean.
+    # Passing it would only serve to hide a stray file from the published archive.
+    run cargo publish $PUBLISH_ARGS
 fi
 
 run git tag -a "$TAG" -m "${CRATE} v${VERSION}"
