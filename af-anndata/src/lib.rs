@@ -1,3 +1,45 @@
+//! Converts [alevin-fry] / [simpleaf] quantification output into the [AnnData]
+//! (`.h5ad`) format.
+//!
+//! Point [`convert_csr_to_anndata`] at an `af_quant` directory and it writes a
+//! single HDF5-backed AnnData file: the matrix-market counts become `X`, the cell
+//! barcodes and gene ids become the `obs` and `var` indices, per-cell metrics from
+//! `featureDump.txt` become `obs` columns, and the run's JSON metadata becomes
+//! `uns` entries.
+//!
+//! ```no_run
+//! use af_anndata::{convert_csr_to_anndata_with_opts, ConvertOpts};
+//! use std::path::Path;
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! convert_csr_to_anndata_with_opts(
+//!     Path::new("af_quant"),
+//!     Path::new("out.h5ad"),
+//!     ConvertOpts { sort_index: true },
+//! )?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # USA mode
+//!
+//! In USA mode the feature axis carries unspliced, spliced and ambiguous counts
+//! for every gene, so there are three times as many columns as genes. These are
+//! split into the `unspliced`, `spliced` and `ambiguous` layers and `X` is set to
+//! their sum, over a `var` axis of just the genes.
+//!
+//! # Dependency version coupling
+//!
+//! `anndata` does not re-export `polars` or `nalgebra-sparse`, yet both cross its
+//! API boundary. This crate must declare exactly the versions `anndata` requires;
+//! anything else resolves two copies and fails with `cannot add
+//! &CsrMatrix<i32> to CsrMatrix<i32>`, where both types look identical. See the
+//! note in `Cargo.toml` and the README.
+//!
+//! [alevin-fry]: https://github.com/COMBINE-lab/alevin-fry
+//! [simpleaf]: https://github.com/COMBINE-lab/simpleaf
+//! [AnnData]: https://anndata.readthedocs.io/en/stable/
+
 use anndata::data::array::dataframe::DataFrameIndex;
 use anndata::{reader::MMReader, s, AnnData, AnnDataOp, ArrayData, ArrayElemOp};
 use anndata_hdf5::H5;

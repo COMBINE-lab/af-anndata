@@ -1,0 +1,81 @@
+name: af-anndata-check
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    if: "!contains(github.event.head_commit.message, 'skip ci')"
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # `--locked`: this is the build users get from the committed lockfile, and
+      # the one the release script publishes.
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --locked --workspace --verbose
+
+      - name: Run tests
+        run: cargo test --locked --workspace --verbose
+
+  # Regression test for COMBINE-lab/af-anndata#2.
+  #
+  # That issue was an unlocked build failing with "cannot add &CsrMatrix<i32> to
+  # CsrMatrix<i32>": anndata's caret requirement floated to a release that had
+  # bumped nalgebra-sparse and polars, while this crate stayed pinned to the
+  # older ones, so the same nominal type resolved to two different crates. The
+  # committed lockfile hid it, which is exactly why it has to be tested without.
+  #
+  # If this job fails, do NOT relax the pins -- realign nalgebra-sparse and
+  # polars with whatever `anndata` currently requires.
+  build_unlocked:
+    if: "!contains(github.event.head_commit.message, 'skip ci')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve dependencies afresh
+        run: rm -f Cargo.lock && cargo update
+
+      - name: Build without a lockfile
+        run: cargo build --workspace --verbose
+
+      # The bug above is only possible when a crate appears twice in the graph.
+      - name: Assert no duplicate polars or nalgebra-sparse
+        shell: bash
+        run: |
+          for c in polars nalgebra-sparse ndarray; do
+            n=$(grep -c "^name = \"$c\"$" Cargo.lock || true)
+            echo "$c: $n copy/copies"
+            if [ "$n" -gt 1 ]; then
+              echo "::error::$c appears $n times; it crosses the anndata API boundary and must be unique"
+              exit 1
+            fi
+          done
