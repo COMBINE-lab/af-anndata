@@ -38,8 +38,11 @@ flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
 # CsrMatrix" (see COMBINE-lab/af-anndata#2). anndata 0.7.0 requires
 # nalgebra-sparse ^0.11 and polars ^0.53 -- do not "upgrade" these past that.
 nalgebra-sparse = { version = "0.11", features = ["io"] }
-polars = { version = "0.53", features = ["polars-io"] }
-polars-io = { version = "0.53", features = ["csv", "json"] }
+# This crate only reads the Matrix Market metadata TSV through Polars. In
+# particular, its JSON handling is serde_json-based and does not require the
+# sizeable `polars-io/json` implementation.
+polars = { version = "0.53", default-features = false, features = ["polars-io"] }
+polars-io = { version = "0.53", default-features = false, features = ["csv"] }
 # Not used in our code -- declared solely to hold a transitive dependency at a
 # version that builds. `anndata-hdf5` enables hdf5-metno-sys's `static` feature
 # unconditionally, so HDF5 is always compiled from the sources this crate
