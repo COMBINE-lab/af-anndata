@@ -2315,7 +2315,6 @@ dependencies = [
  "bytes",
  "chrono",
  "fast-float2",
- "flate2",
  "fs4",
  "futures",
  "glob",
@@ -2342,11 +2341,9 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "simd-json",
  "simdutf8",
  "tokio",
  "zmij",
- "zstd",
 ]
 
 [[package]]
