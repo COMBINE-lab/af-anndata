@@ -330,7 +330,7 @@ fn read_gene_id_to_name(path: &Path) -> anyhow::Result<HashMap<String, String>> 
 /// has such ids: the genes of the probes that are not in the index. A column id
 /// that has no name gets a missing value, as a left join in pyroe `load_fry`.
 fn build_var_df(gene_ids: &[String], gene_id_to_name: Option<&Path>) -> anyhow::Result<DataFrame> {
-    let mut columns = vec![Column::new("gene_id".into(), gene_ids)];
+    let mut columns = vec![Column::new("gene_ids".into(), gene_ids)];
     if let Some(path) = gene_id_to_name {
         let names = read_gene_id_to_name(path)?;
         let symbols: Vec<Option<&str>> = gene_ids
@@ -340,13 +340,13 @@ fn build_var_df(gene_ids: &[String], gene_id_to_name: Option<&Path>) -> anyhow::
         let n_missing = symbols.iter().filter(|s| s.is_none()).count();
         if n_missing > 0 {
             warn!(
-                "{} of {} matrix columns have no name in {}; their gene_symbol is missing",
+                "{} of {} matrix columns have no name in {}; their gene_names value is missing",
                 n_missing,
                 gene_ids.len(),
                 path.display()
             );
         }
-        columns.push(Column::new("gene_symbol".into(), symbols));
+        columns.push(Column::new("gene_names".into(), symbols));
     }
     Ok(DataFrame::new(gene_ids.len(), columns)?)
 }
@@ -549,7 +549,7 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
             bail!(err);
         }
     };
-    col_df.set_column_names(&["gene_id"])?;
+    col_df.set_column_names(&["gene_ids"])?;
 
     // read the barcodes
     let mut row_df = match CsvReadOptions::default()
@@ -612,7 +612,7 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
         ncols
     };
     let gene_ids: Vec<String> = col_df
-        .column("gene_id")?
+        .column("gene_ids")?
         .str()?
         .iter()
         .take(ngenes)

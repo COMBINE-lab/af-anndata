@@ -15,8 +15,8 @@ Point it at an `af_quant` directory and it produces one HDF5-backed AnnData file
 |---|---|
 | `alevin/quants_mat.mtx` | `X` (and, in USA mode, the layers below) |
 | `alevin/quants_mat_rows.txt` | the `obs` index (cell barcodes) |
-| `alevin/quants_mat_cols.txt` | the `var` index (gene ids) |
-| `gene_id_to_name.tsv` | `var["gene_symbol"]`, if present |
+| `alevin/quants_mat_cols.txt` | the `var` index and `var["gene_ids"]` (gene ids) |
+| `gene_id_to_name.tsv` | `var["gene_names"]`, if present |
 | `featureDump.txt` | per-cell QC metrics in `obs` |
 | `*.json` run metadata | `uns` entries |
 
@@ -35,7 +35,7 @@ separate `sample_name` and `cell_barcode` columns in `obs`.
 
 ```toml
 [dependencies]
-af-anndata = "0.5"
+af-anndata = "0.6"
 ```
 
 ## Usage
@@ -80,6 +80,19 @@ script only accepts HDF5 minor versions `{0,1,8,10,12,14}` and panics with
 `Invalid H5_VERSION: "2.2.0"`. The committed `Cargo.lock` therefore holds
 `hdf5-metno-src` at 0.10.2. This only bites builds that compile HDF5 from source;
 if you have a system HDF5, `hdf5-metno-sys` links it and never gets there.
+
+## Upgrading from 0.5 to 0.6
+
+The `var` columns have new names, the same names that pyroe `load_fry` uses:
+
+| 0.5 | 0.6 |
+|---|---|
+| `var["gene_id"]` | `var["gene_ids"]` |
+| `var["gene_symbol"]` | `var["gene_names"]` |
+
+Code that reads these columns must use the new names.
+The `obs` columns (`barcodes`, `cell_barcode`, `sample_name`, and the
+`featureDump.txt` metrics) do not change.
 
 ## Related projects
 

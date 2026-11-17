@@ -161,8 +161,8 @@ fn check_var(out: &Path) {
     let adata = open(out);
     let var_names = adata.var_names().into_vec();
     let var = adata.read_var().unwrap();
-    let ids = str_column(&var, "gene_id");
-    let symbols = str_column(&var, "gene_symbol");
+    let ids = str_column(&var, "gene_ids");
+    let symbols = str_column(&var, "gene_names");
 
     assert_eq!(var.height(), GENES.len(), "one var row per matrix column");
     let expected = expected_names();
@@ -191,7 +191,7 @@ fn a_column_with_no_name_is_missing_not_empty() {
     let adata = open(&out);
     let var = adata.read_var().unwrap();
     let g4 = GENES.iter().position(|g| *g == "G4").unwrap();
-    assert_eq!(str_column(&var, "gene_symbol")[g4], None);
+    assert_eq!(str_column(&var, "gene_names")[g4], None);
 }
 
 #[test]
