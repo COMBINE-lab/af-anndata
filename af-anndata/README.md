@@ -41,15 +41,18 @@ separate `sample_name` and `cell_barcode` columns in `obs`.
 |---|---|
 | `alevin/probe_quants_mat.mtx` | `X` (cells x probes) |
 | `alevin/probe_quants_mat_rows.txt` | the `obs` index; it must be the same as `quants_mat_rows.txt` |
-| `alevin/probe_quants_mat_cols.txt` | the `var` index and `var["probe_id"]` |
-| the 10x probe-set CSV | `var["gene_ids"]`, `var["gene_names"]`, `var["region"]` |
+| `alevin/probe_quants_mat_cols.txt` | the `var` index (probe ids) |
+| the 10x probe-set CSV | all `var` columns, as in the CSV (for example `gene_id`, `probe_seq`, `probe_id`, `included`, `region`, `gene_name`) |
 | `featureDump.txt`, `*.json` | `obs` columns and `uns`, as in the gene file |
 
 The CSV is the argument `probe_set`, or else `<af_quant>/probe_set.csv`.
 It is an error if there is no CSV, or if a matrix probe is not in the CSV.
-The CSV must have `probe_id` and `gene_id` columns.
-`gene_name` and `region` are optional; the other columns are not copied.
-If the CSV has no `gene_name` column, the names come from `gene_id_to_name.tsv`.
+`var` is the CSV as it is: every column with its name and the type that the
+CSV reader gives (`included` becomes a bool), and the rows of the matrix probes
+in matrix column order. The `#` lines before the header are skipped.
+The CSV must have a `probe_id` column, and a `probe_id` must not occur two times.
+The gene file uses `gene_ids` and `gene_names`; the probe file keeps the CSV
+names `gene_id` and `gene_name`.
 The probe columns are in the order of the RAD header, not of the CSV, so join
 on `probe_id`, not on position.
 

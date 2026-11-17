@@ -49,7 +49,9 @@ use anndata::{reader::MMReader, s, AnnData, AnnDataOp, ArrayData, ArrayElemOp};
 use anndata_hdf5::H5;
 use anyhow::{bail, Context};
 use polars::io::prelude::*;
-use polars::prelude::{Column, CsvReadOptions, DataFrame, DataType, Field, PolarsError, Schema};
+use polars::prelude::{
+    Column, CsvReadOptions, DataFrame, DataType, Field, IdxCa, IdxSize, PolarsError, Schema,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -394,10 +396,10 @@ pub const PROBE_SET_FILE: &str = "probe_set.csv";
 /// The input is the output of `alevin-fry quant-probe --probe-mtx`:
 /// `alevin/probe_quants_mat.mtx` (cells x probes) and its rows and cols files.
 /// `obs` is the same as in the gene file of [`convert_csr_to_anndata_with_opts`].
-/// `var` comes from the 10x probe-set CSV, joined on `probe_id`: the columns
-/// `probe_id`, `gene_ids`, `gene_names` and `region` (`gene_names` and `region`
-/// only if the CSV has them). If the CSV has no `gene_name` column, the names
-/// come from `gene_id_to_name.tsv`.
+/// `var` is the 10x probe-set CSV as it is: all its columns, with their names
+/// and the types that the CSV reader gives, and the rows of the matrix probes
+/// in matrix column order (joined on `probe_id`). The `#` lines before the
+/// header are skipped.
 ///
 /// The CSV is `probe_set`, or else `<root_path>/probe_set.csv`. It is an error
 /// if neither exists, or if a matrix probe is not in the CSV.
@@ -430,8 +432,8 @@ fn find_probe_set(root_path: &Path, given: Option<&Path>) -> anyhow::Result<Path
     Ok(p)
 }
 
-/// Reads the table of a 10x probe-set CSV, with all columns as strings. The
-/// `#` lines before the header are skipped.
+/// Reads the table of a 10x probe-set CSV. The `#` lines before the header are
+/// skipped.
 fn read_probe_set(path: &Path) -> anyhow::Result<DataFrame> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("could not read {}", path.display()))?;
@@ -439,55 +441,31 @@ fn read_probe_set(path: &Path) -> anyhow::Result<DataFrame> {
     let table = CsvReadOptions::default()
         .with_has_header(true)
         .with_skip_lines(n_hash_lines)
-        // 0 rows for the schema: every column is read as a string.
-        .with_infer_schema_length(Some(0))
         .with_raise_if_empty(true)
         .try_into_reader_with_file_path(Some(path.to_path_buf()))?
         .finish()
         .with_context(|| format!("could not read the table of {}", path.display()))?;
-    for required in ["probe_id", "gene_id"] {
-        if table.column(required).is_err() {
-            bail!(
-                "{} has no `{}` column; its columns are {:?}",
-                path.display(),
-                required,
-                table.get_column_names()
-            );
-        }
+    if table.column("probe_id").is_err() {
+        bail!(
+            "{} has no `probe_id` column; its columns are {:?}",
+            path.display(),
+            table.get_column_names()
+        );
     }
     Ok(table)
 }
 
-/// Returns the values of the string column `name` of the probe-set table, in
-/// the order of `rows`, or `None` if the table has no such column.
-fn probe_set_column<'a>(
-    table: &'a DataFrame,
-    name: &str,
-    rows: &[usize],
-) -> anyhow::Result<Option<Vec<Option<&'a str>>>> {
-    let Ok(col) = table.column(name) else {
-        return Ok(None);
-    };
-    let col = col.str()?;
-    Ok(Some(rows.iter().map(|&r| col.get(r)).collect()))
-}
-
-/// Makes the probe `var`: the probe ids are the matrix columns, and the
-/// annotations are joined from the probe-set CSV on `probe_id`.
-fn probe_var(
-    probe_ids: &[String],
-    probe_set: &Path,
-    gene_id_to_name: Option<&Path>,
-) -> anyhow::Result<DataFrame> {
+/// Makes the probe `var`: the rows of the probe-set CSV for the matrix probes
+/// `probe_ids`, in that order, with all CSV columns as they are.
+fn probe_var(probe_ids: &[String], probe_set: &Path) -> anyhow::Result<DataFrame> {
     let table = read_probe_set(probe_set)?;
-
     let csv_ids = table.column("probe_id")?.str()?;
     let mut row_of = HashMap::with_capacity(csv_ids.len());
     for (r, id) in csv_ids.iter().enumerate() {
         let id = id.with_context(|| {
             format!("{} data row {} has no probe_id", probe_set.display(), r + 1)
         })?;
-        if row_of.insert(id, r).is_some() {
+        if row_of.insert(id, r as IdxSize).is_some() {
             bail!(
                 "{}: the probe_id {:?} occurs more than one time",
                 probe_set.display(),
@@ -509,40 +487,8 @@ fn probe_var(
             &missing[..missing.len().min(5)]
         );
     }
-    let rows: Vec<usize> = probe_ids.iter().map(|id| row_of[id.as_str()]).collect();
-
-    let gene_ids: Vec<&str> = probe_set_column(&table, "gene_id", &rows)?
-        .expect("gene_id is a required column")
-        .into_iter()
-        .zip(probe_ids)
-        .map(|(g, p)| {
-            g.with_context(|| format!("{}: probe {} has no gene_id", probe_set.display(), p))
-        })
-        .collect::<anyhow::Result<_>>()?;
-
-    let mut columns = vec![
-        Column::new("probe_id".into(), probe_ids),
-        Column::new("gene_ids".into(), &gene_ids),
-    ];
-    if let Some(names) = probe_set_column(&table, "gene_name", &rows)? {
-        columns.push(Column::new("gene_names".into(), names));
-    } else if let Some(path) = gene_id_to_name {
-        let names = read_gene_id_to_name(path)?;
-        let names: Vec<Option<&str>> = gene_ids
-            .iter()
-            .map(|g| names.get(*g).map(String::as_str))
-            .collect();
-        columns.push(Column::new("gene_names".into(), names));
-    } else {
-        warn!(
-            "{} has no gene_name column and there is no gene_id_to_name file, so `var` has no gene_names",
-            probe_set.display()
-        );
-    }
-    if let Some(region) = probe_set_column(&table, "region", &rows)? {
-        columns.push(Column::new("region".into(), region));
-    }
-    Ok(DataFrame::new(probe_ids.len(), columns)?)
+    let rows: Vec<IdxSize> = probe_ids.iter().map(|id| row_of[id.as_str()]).collect();
+    Ok(table.take(&IdxCa::from_vec("rows".into(), rows))?)
 }
 
 /// Writes the gene matrix (`probe_set` is `None`) or the probe matrix of
@@ -830,7 +776,7 @@ fn write_anndata(
                 gene_rows.display()
             );
         }
-        probe_var(&gene_ids, probe_set, gene_id_to_name_path.as_deref())?
+        probe_var(&gene_ids, probe_set)?
     } else {
         build_var_df(&gene_ids, gene_id_to_name_path.as_deref())?
     };
@@ -1059,15 +1005,15 @@ mod tests {
     fn probe_var_err(test: &str, csv: &str) -> String {
         let p = name_file(test, csv);
         let ids = vec!["P1".to_string(), "P2".to_string()];
-        let err = probe_var(&ids, &p, None).unwrap_err().to_string();
+        let err = probe_var(&ids, &p).unwrap_err().to_string();
         std::fs::remove_file(&p).unwrap();
         err
     }
 
     #[test]
-    fn probe_set_needs_probe_id_and_gene_id_columns() {
-        let err = probe_var_err("cols", "gene,probe_id\nG1,P1\nG2,P2\n");
-        assert!(err.contains("no `gene_id` column"), "{err}");
+    fn probe_set_needs_a_probe_id_column() {
+        let err = probe_var_err("cols", "gene_id,probe\nG1,P1\nG2,P2\n");
+        assert!(err.contains("no `probe_id` column"), "{err}");
     }
 
     #[test]
@@ -1078,15 +1024,16 @@ mod tests {
     }
 
     #[test]
-    fn probe_set_without_optional_columns_gives_probe_id_and_gene_ids_only() {
-        let p = name_file("minimal", "gene_id,probe_id\nG2,P2\nG1,P1\n");
+    fn probe_var_is_the_csv_rows_of_the_matrix_probes_in_matrix_order() {
+        let csv = format!("{PROBE_HEADER}G2,P2,TRUE\nGX,PX,FALSE\nG1,P1,TRUE\n");
+        let p = name_file("asis", &csv);
         let ids = vec!["P1".to_string(), "P2".to_string()];
-        let var = probe_var(&ids, &p, None).unwrap();
+        let var = probe_var(&ids, &p).unwrap();
         std::fs::remove_file(&p).unwrap();
         let cols: Vec<&str> = var.get_column_names().iter().map(|c| c.as_str()).collect();
-        assert_eq!(cols, ["probe_id", "gene_ids"]);
+        assert_eq!(cols, ["gene_id", "probe_id", "included"]);
         let genes: Vec<Option<&str>> = var
-            .column("gene_ids")
+            .column("gene_id")
             .unwrap()
             .str()
             .unwrap()

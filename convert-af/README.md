@@ -50,7 +50,7 @@ QC metrics from `featureDump.txt` land in `obs`, and the run's JSON metadata in
 `uns`.
 
 With `--probe`, `X` holds the probe counts and `var` is indexed by probe id,
-with the gene id, gene name and region from the probe-set CSV.
+with all the columns of the probe-set CSV, as they are.
 `obs` is the same as in the gene file. See the af-anndata README.
 
 ## License

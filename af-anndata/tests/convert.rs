@@ -380,17 +380,33 @@ fn probe_var_comes_from_the_probe_set_csv() {
     assert_eq!(adata.var_names().into_vec(), PROBES.to_vec());
     let var = adata.read_var().unwrap();
     let cols: Vec<&str> = var.get_column_names().iter().map(|c| c.as_str()).collect();
-    assert_eq!(cols, ["probe_id", "gene_ids", "gene_names", "region"]);
+    // The CSV header, with no rename and no drop.
+    assert_eq!(
+        cols,
+        [
+            "gene_id",
+            "probe_seq",
+            "probe_id",
+            "included",
+            "region",
+            "gene_name"
+        ]
+    );
+    let genes = str_column(&var, "gene_id");
+    let seqs = str_column(&var, "probe_seq");
     let ids = str_column(&var, "probe_id");
-    let genes = str_column(&var, "gene_ids");
-    let names = str_column(&var, "gene_names");
     let region = str_column(&var, "region");
+    let names = str_column(&var, "gene_name");
+    // The CSV reader reads TRUE/FALSE as bool.
+    let included = var.column("included").unwrap().bool().unwrap();
     for (k, p) in PROBES.iter().enumerate() {
         let row = PROBE_CSV.iter().find(|r| r.1 == *p).unwrap();
-        assert_eq!(ids[k].as_deref(), Some(*p));
         assert_eq!(genes[k].as_deref(), Some(row.0));
-        assert_eq!(names[k].as_deref(), Some(row.4));
+        assert_eq!(seqs[k].as_deref(), Some("ACGTACGTAC"));
+        assert_eq!(ids[k].as_deref(), Some(*p));
+        assert_eq!(included.get(k), Some(row.2 == "TRUE"));
         assert_eq!(region[k].as_deref(), Some(row.3));
+        assert_eq!(names[k].as_deref(), Some(row.4));
     }
 }
 
@@ -405,7 +421,7 @@ fn probe_x_summed_by_gene_equals_gene_x_and_obs_is_the_same() {
     let ga = open(&gene_out);
     let px: CsrMatrix<f64> = pa.x().get().unwrap().unwrap();
     let gx: CsrMatrix<f64> = ga.x().get().unwrap().unwrap();
-    let probe_genes = str_column(&pa.read_var().unwrap(), "gene_ids");
+    let probe_genes = str_column(&pa.read_var().unwrap(), "gene_id");
     let gene_names = ga.var_names().into_vec();
 
     let mut summed: HashMap<(usize, String), f64> = HashMap::new();
@@ -418,7 +434,7 @@ fn probe_x_summed_by_gene_equals_gene_x_and_obs_is_the_same() {
         .triplet_iter()
         .map(|(i, j, v)| ((i, gene_names[j].clone()), *v))
         .collect();
-    assert_eq!(summed, gene, "probe X summed by gene_ids equals gene X");
+    assert_eq!(summed, gene, "probe X summed by var gene_id equals gene X");
 
     assert_eq!(pa.obs_names().into_vec(), ga.obs_names().into_vec());
     let (po, go) = (pa.read_obs().unwrap(), ga.read_obs().unwrap());
@@ -428,22 +444,18 @@ fn probe_x_summed_by_gene_equals_gene_x_and_obs_is_the_same() {
 }
 
 #[test]
-fn probe_names_come_from_gene_id_to_name_when_the_csv_has_none() {
+fn probe_ref_path_is_used_and_a_csv_without_gene_name_stays_without_it() {
     let root = make_probe_af_quant("probe_noname", false);
     let csv = root.join("other_dir_probe_set.csv");
     write_probe_csv(&csv, false);
     let out = convert_probe(&root, Some(&csv)).unwrap();
     let var = open(&out).read_var().unwrap();
-    let genes = str_column(&var, "gene_ids");
-    let names = str_column(&var, "gene_names");
-    let expected = expected_names();
-    for k in 0..PROBES.len() {
-        let g = genes[k].as_deref().unwrap();
-        assert_eq!(names[k].as_deref(), expected[g], "name of {g}");
-    }
-    // G4 has no name in gene_id_to_name.tsv.
-    let g4 = PROBES.iter().position(|p| p.starts_with("G4|")).unwrap();
-    assert_eq!(names[g4], None);
+    let cols: Vec<&str> = var.get_column_names().iter().map(|c| c.as_str()).collect();
+    // No gene_id_to_name.tsv fallback at probe level.
+    assert_eq!(
+        cols,
+        ["gene_id", "probe_seq", "probe_id", "included", "region"]
+    );
 }
 
 #[test]
@@ -502,7 +514,7 @@ fn probe_sort_index_keeps_the_annotations_with_their_probe() {
     sorted.sort();
     assert_eq!(names, sorted);
     let var = adata.read_var().unwrap();
-    let genes = str_column(&var, "gene_ids");
+    let genes = str_column(&var, "gene_id");
     let region = str_column(&var, "region");
     for (k, p) in names.iter().enumerate() {
         let row = PROBE_CSV.iter().find(|r| r.1 == p.as_str()).unwrap();
