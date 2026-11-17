@@ -7,6 +7,10 @@
 //! `featureDump.txt` become `obs` columns, and the run's JSON metadata becomes
 //! `uns` entries.
 //!
+//! For a 10x Flex run of `alevin-fry quant-probe --probe-mtx`,
+//! [`convert_probe_csr_to_anndata`] writes the probe matrix to a second file,
+//! with the same `obs` and a `var` from the 10x probe-set CSV.
+//!
 //! ```no_run
 //! use af_anndata::{convert_csr_to_anndata_with_opts, ConvertOpts};
 //! use std::path::Path;
@@ -378,7 +382,190 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
     output_path: P,
     opts: ConvertOpts,
 ) -> anyhow::Result<()> {
+    write_anndata(root_path.as_ref(), output_path.as_ref(), opts, None)
+}
+
+/// The file name of the 10x probe-set CSV in an `af_quant` directory.
+pub const PROBE_SET_FILE: &str = "probe_set.csv";
+
+/// Convert the probe matrix of an `af_quant` directory to an HDF5-backed
+/// AnnData file.
+///
+/// The input is the output of `alevin-fry quant-probe --probe-mtx`:
+/// `alevin/probe_quants_mat.mtx` (cells x probes) and its rows and cols files.
+/// `obs` is the same as in the gene file of [`convert_csr_to_anndata_with_opts`].
+/// `var` comes from the 10x probe-set CSV, joined on `probe_id`: the columns
+/// `probe_id`, `gene_ids`, `gene_names` and `region` (`gene_names` and `region`
+/// only if the CSV has them). If the CSV has no `gene_name` column, the names
+/// come from `gene_id_to_name.tsv`.
+///
+/// The CSV is `probe_set`, or else `<root_path>/probe_set.csv`. It is an error
+/// if neither exists, or if a matrix probe is not in the CSV.
+pub fn convert_probe_csr_to_anndata<P: AsRef<Path>>(
+    root_path: P,
+    output_path: P,
+    probe_set: Option<&Path>,
+    opts: ConvertOpts,
+) -> anyhow::Result<()> {
     let root_path = root_path.as_ref();
+    let probe_set = find_probe_set(root_path, probe_set)?;
+    write_anndata(root_path, output_path.as_ref(), opts, Some(&probe_set))
+}
+
+/// Returns the probe-set CSV: `given`, or else `<root_path>/probe_set.csv`.
+fn find_probe_set(root_path: &Path, given: Option<&Path>) -> anyhow::Result<PathBuf> {
+    if let Some(p) = given {
+        if !p.is_file() {
+            bail!("the probe-set CSV {} does not exist", p.display());
+        }
+        return Ok(p.to_path_buf());
+    }
+    let p = root_path.join(PROBE_SET_FILE);
+    if !p.is_file() {
+        bail!(
+            "no probe-set CSV was given, and {} does not exist; give the 10x probe-set CSV of the run",
+            p.display()
+        );
+    }
+    Ok(p)
+}
+
+/// Reads the table of a 10x probe-set CSV, with all columns as strings. The
+/// `#` lines before the header are skipped.
+fn read_probe_set(path: &Path) -> anyhow::Result<DataFrame> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    let n_hash_lines = text.lines().take_while(|l| l.starts_with('#')).count();
+    let table = CsvReadOptions::default()
+        .with_has_header(true)
+        .with_skip_lines(n_hash_lines)
+        // 0 rows for the schema: every column is read as a string.
+        .with_infer_schema_length(Some(0))
+        .with_raise_if_empty(true)
+        .try_into_reader_with_file_path(Some(path.to_path_buf()))?
+        .finish()
+        .with_context(|| format!("could not read the table of {}", path.display()))?;
+    for required in ["probe_id", "gene_id"] {
+        if table.column(required).is_err() {
+            bail!(
+                "{} has no `{}` column; its columns are {:?}",
+                path.display(),
+                required,
+                table.get_column_names()
+            );
+        }
+    }
+    Ok(table)
+}
+
+/// Returns the values of the string column `name` of the probe-set table, in
+/// the order of `rows`, or `None` if the table has no such column.
+fn probe_set_column<'a>(
+    table: &'a DataFrame,
+    name: &str,
+    rows: &[usize],
+) -> anyhow::Result<Option<Vec<Option<&'a str>>>> {
+    let Ok(col) = table.column(name) else {
+        return Ok(None);
+    };
+    let col = col.str()?;
+    Ok(Some(rows.iter().map(|&r| col.get(r)).collect()))
+}
+
+/// Makes the probe `var`: the probe ids are the matrix columns, and the
+/// annotations are joined from the probe-set CSV on `probe_id`.
+fn probe_var(
+    probe_ids: &[String],
+    probe_set: &Path,
+    gene_id_to_name: Option<&Path>,
+) -> anyhow::Result<DataFrame> {
+    let table = read_probe_set(probe_set)?;
+
+    let csv_ids = table.column("probe_id")?.str()?;
+    let mut row_of = HashMap::with_capacity(csv_ids.len());
+    for (r, id) in csv_ids.iter().enumerate() {
+        let id = id.with_context(|| {
+            format!("{} data row {} has no probe_id", probe_set.display(), r + 1)
+        })?;
+        if row_of.insert(id, r).is_some() {
+            bail!(
+                "{}: the probe_id {:?} occurs more than one time",
+                probe_set.display(),
+                id
+            );
+        }
+    }
+    let missing: Vec<&str> = probe_ids
+        .iter()
+        .filter(|id| !row_of.contains_key(id.as_str()))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "{} of {} matrix probes are not in {} (the first ones: {:?}); give the probe-set CSV that the index was made from",
+            missing.len(),
+            probe_ids.len(),
+            probe_set.display(),
+            &missing[..missing.len().min(5)]
+        );
+    }
+    let rows: Vec<usize> = probe_ids.iter().map(|id| row_of[id.as_str()]).collect();
+
+    let gene_ids: Vec<&str> = probe_set_column(&table, "gene_id", &rows)?
+        .expect("gene_id is a required column")
+        .into_iter()
+        .zip(probe_ids)
+        .map(|(g, p)| {
+            g.with_context(|| format!("{}: probe {} has no gene_id", probe_set.display(), p))
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    let mut columns = vec![
+        Column::new("probe_id".into(), probe_ids),
+        Column::new("gene_ids".into(), &gene_ids),
+    ];
+    if let Some(names) = probe_set_column(&table, "gene_name", &rows)? {
+        columns.push(Column::new("gene_names".into(), names));
+    } else if let Some(path) = gene_id_to_name {
+        let names = read_gene_id_to_name(path)?;
+        let names: Vec<Option<&str>> = gene_ids
+            .iter()
+            .map(|g| names.get(*g).map(String::as_str))
+            .collect();
+        columns.push(Column::new("gene_names".into(), names));
+    } else {
+        warn!(
+            "{} has no gene_name column and there is no gene_id_to_name file, so `var` has no gene_names",
+            probe_set.display()
+        );
+    }
+    if let Some(region) = probe_set_column(&table, "region", &rows)? {
+        columns.push(Column::new("region".into(), region));
+    }
+    Ok(DataFrame::new(probe_ids.len(), columns)?)
+}
+
+/// Writes the gene matrix (`probe_set` is `None`) or the probe matrix of
+/// `alevin-fry quant-probe --probe-mtx` (`probe_set` is the 10x probe-set CSV).
+fn write_anndata(
+    root_path: &Path,
+    output_path: &Path,
+    opts: ConvertOpts,
+    probe_set: Option<&Path>,
+) -> anyhow::Result<()> {
+    let (mtx_file, rows_file, cols_file) = if probe_set.is_some() {
+        (
+            "probe_quants_mat.mtx",
+            "probe_quants_mat_rows.txt",
+            "probe_quants_mat_cols.txt",
+        )
+    } else {
+        (
+            "quants_mat.mtx",
+            "quants_mat_rows.txt",
+            "quants_mat_cols.txt",
+        )
+    };
     let json_path = PathBuf::from(&root_path);
 
     let mut gpl_path = json_path.clone();
@@ -401,13 +588,13 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
 
     let alevin_path = root_path.join("alevin");
     let mut p = PathBuf::from(&alevin_path);
-    p.push("quants_mat.mtx");
+    p.push(mtx_file);
 
     let mut colpath = PathBuf::from(&alevin_path);
-    colpath.push("quants_mat_cols.txt");
+    colpath.push(cols_file);
 
     let mut rowpath = PathBuf::from(&alevin_path);
-    rowpath.push("quants_mat_rows.txt");
+    rowpath.push(rows_file);
 
     let mut gene_id_to_name_path = PathBuf::from(&root_path);
     gene_id_to_name_path.push("gene_id_to_name.tsv");
@@ -453,8 +640,8 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
     let gene_id_to_name_path = gene_id_to_name_path
         .is_file()
         .then_some(gene_id_to_name_path);
-    // otherwise, wan the user
-    if gene_id_to_name_path.is_none() {
+    // otherwise, wan the user (a probe run can take the names from its CSV)
+    if gene_id_to_name_path.is_none() && probe_set.is_none() {
         warn!(
             "Could not find the `gene_id_to_name` file, so only gene IDs and not symbols will be present in `var`"
         );
@@ -556,7 +743,7 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
         .with_has_header(false)
         .with_parse_options(parse_opts.clone())
         .with_raise_if_empty(true)
-        .try_into_reader_with_file_path(Some(rowpath))?
+        .try_into_reader_with_file_path(Some(rowpath.clone()))?
         .finish()
     {
         Ok(dframe) => dframe,
@@ -622,10 +809,34 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
                 .with_context(|| format!("quants_mat_cols.txt line {} is empty", i + 1))
         })
         .collect::<anyhow::Result<_>>()?;
-    let var_df = build_var_df(&gene_ids, gene_id_to_name_path.as_deref())?;
+    // In a probe run, usa_mode is false, so `gene_ids` are all the probe ids.
+    let var_df = if let Some(probe_set) = probe_set {
+        if usa_mode {
+            bail!(
+                "{} has usa_mode true, but a probe matrix has no USA mode",
+                quant_path.display()
+            );
+        }
+        // obs comes from featureDump.txt, which follows the gene rows.
+        let gene_rows = alevin_path.join("quants_mat_rows.txt");
+        let same_rows = std::fs::read(&rowpath)
+            .with_context(|| format!("could not read {}", rowpath.display()))?
+            == std::fs::read(&gene_rows)
+                .with_context(|| format!("could not read {}", gene_rows.display()))?;
+        if !same_rows {
+            bail!(
+                "{} is not the same as {}, so featureDump.txt does not describe its rows",
+                rowpath.display(),
+                gene_rows.display()
+            );
+        }
+        probe_var(&gene_ids, probe_set, gene_id_to_name_path.as_deref())?
+    } else {
+        build_var_df(&gene_ids, gene_id_to_name_path.as_deref())?
+    };
 
     // make the AnnData object and populate it from the MMReader
-    let mut b = AnnData::<H5>::new(output_path.as_ref())?;
+    let mut b = AnnData::<H5>::new(output_path)?;
     r.finish(&b)?;
     info!("Reading MM into AnnData took {:#?}", sw.elapsed());
 
@@ -841,7 +1052,48 @@ fn sort_by_index<B: anndata::Backend>(
 
 #[cfg(test)]
 mod tests {
-    use super::{argsort, parse_multiplex_barcodes, read_gene_id_to_name};
+    use super::{argsort, parse_multiplex_barcodes, probe_var, read_gene_id_to_name};
+
+    const PROBE_HEADER: &str = "#probe_set_file_format=3.0\ngene_id,probe_id,included\n";
+
+    fn probe_var_err(test: &str, csv: &str) -> String {
+        let p = name_file(test, csv);
+        let ids = vec!["P1".to_string(), "P2".to_string()];
+        let err = probe_var(&ids, &p, None).unwrap_err().to_string();
+        std::fs::remove_file(&p).unwrap();
+        err
+    }
+
+    #[test]
+    fn probe_set_needs_probe_id_and_gene_id_columns() {
+        let err = probe_var_err("cols", "gene,probe_id\nG1,P1\nG2,P2\n");
+        assert!(err.contains("no `gene_id` column"), "{err}");
+    }
+
+    #[test]
+    fn probe_set_rejects_a_duplicate_probe_id() {
+        let csv = format!("{PROBE_HEADER}G1,P1,TRUE\nG2,P2,TRUE\nG3,P1,TRUE\n");
+        let err = probe_var_err("dupprobe", &csv);
+        assert!(err.contains("\"P1\" occurs more than one time"), "{err}");
+    }
+
+    #[test]
+    fn probe_set_without_optional_columns_gives_probe_id_and_gene_ids_only() {
+        let p = name_file("minimal", "gene_id,probe_id\nG2,P2\nG1,P1\n");
+        let ids = vec!["P1".to_string(), "P2".to_string()];
+        let var = probe_var(&ids, &p, None).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        let cols: Vec<&str> = var.get_column_names().iter().map(|c| c.as_str()).collect();
+        assert_eq!(cols, ["probe_id", "gene_ids"]);
+        let genes: Vec<Option<&str>> = var
+            .column("gene_ids")
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .collect();
+        assert_eq!(genes, [Some("G1"), Some("G2")]);
+    }
 
     fn name_file(test: &str, text: &str) -> std::path::PathBuf {
         let p =

@@ -29,7 +29,7 @@ const NAMES: [(&str, &str); 5] = [
     ("G2", "Gene2"),
 ];
 const SAMPLES: [&str; 3] = ["S_1_A", "S_2_B", "S_3"];
-const NCELLS: usize = 150;
+const NCELLS: usize = 400;
 /// The cell with no counts.
 const EMPTY_CELL: usize = 7;
 
@@ -248,4 +248,280 @@ fn usa_mode_var_has_one_row_per_gene_with_names() {
     let x_sum: f64 = x.values().iter().sum();
     let want_sum: f64 = entries(ncols).iter().map(|e| e.2).sum();
     assert_eq!(x_sum, want_sum, "X is the sum of the S, U and A blocks");
+}
+
+// ---------------------------------------------------------------------------
+// Probe matrix (`alevin-fry quant-probe --probe-mtx`)
+// ---------------------------------------------------------------------------
+
+use af_anndata::convert_probe_csr_to_anndata;
+
+/// Probe-set CSV rows: (gene_id, probe_id, included, region, gene_name).
+/// `GX1` and `GX2` are `included=FALSE` probes that are not matrix columns.
+const PROBE_CSV: [(&str, &str, &str, &str, &str); 8] = [
+    ("G1", "G1|Gene1|p1", "TRUE", "unspliced", "Gene1"),
+    ("G1", "G1|Gene1|p2", "TRUE", "spliced", "Gene1"),
+    ("G2", "G2|Gene2|p1", "TRUE", "unspliced", "Gene2"),
+    ("GX1", "GX1|EXTRA1|p1", "FALSE", "unspliced", "EXTRA1"),
+    ("G3", "G3|Gene3|p1", "TRUE", "spliced", "Gene3"),
+    ("G4", "G4|Gene4|p1", "TRUE", "unspliced", "Gene4"),
+    ("GX2", "GX2|EXTRA2|p1", "FALSE", "spliced", "EXTRA2"),
+    ("G3", "G3|Gene3|p2", "TRUE", "unspliced", "Gene3"),
+];
+/// Probe matrix columns: another order than the CSV, not grouped by gene.
+/// Columns 1 and 4 (the two G1 probes) have counts in the same cells.
+const PROBES: [&str; 6] = [
+    "G3|Gene3|p2",
+    "G1|Gene1|p1",
+    "G4|Gene4|p1",
+    "G2|Gene2|p1",
+    "G1|Gene1|p2",
+    "G3|Gene3|p1",
+];
+
+fn probe_gene(probe: &str) -> &'static str {
+    PROBE_CSV.iter().find(|r| r.1 == probe).unwrap().0
+}
+
+/// Probe counts as (cell, probe column, value).
+fn probe_entries() -> Vec<(usize, usize, f64)> {
+    let mut e = Vec::new();
+    for i in (0..NCELLS).filter(|&i| i != EMPTY_CELL) {
+        e.push((i, i % PROBES.len(), (i % 5 + 1) as f64));
+        e.push((i, (i + 3) % PROBES.len(), (i % 3 + 1) as f64));
+    }
+    e
+}
+
+fn write_mtx(path: &Path, ncols: usize, e: &[(usize, usize, f64)]) {
+    let mut mtx = format!(
+        "%%MatrixMarket matrix coordinate real general\n% written by sprs\n{} {} {:<20}\n",
+        NCELLS,
+        ncols,
+        e.len()
+    );
+    for (i, j, v) in e {
+        mtx.push_str(&format!("{} {} {}\n", i + 1, j + 1, v));
+    }
+    fs::write(path, mtx).unwrap();
+}
+
+/// Writes the probe-set CSV. With `gene_name` false, the CSV has no
+/// `gene_name` column.
+fn write_probe_csv(path: &Path, gene_name: bool) {
+    let mut csv = String::from("#probe_set_file_format=3.0\n#panel_name=Test Panel v1\n");
+    csv.push_str("gene_id,probe_seq,probe_id,included,region");
+    csv.push_str(if gene_name { ",gene_name\n" } else { "\n" });
+    for (g, p, inc, reg, name) in PROBE_CSV {
+        csv.push_str(&format!("{g},ACGTACGTAC,{p},{inc},{reg}"));
+        if gene_name {
+            csv.push_str(&format!(",{name}"));
+        }
+        csv.push('\n');
+    }
+    fs::write(path, csv).unwrap();
+}
+
+/// A multiplex `af_quant` of a `quant-probe --probe-mtx` run. The gene matrix
+/// is the probe matrix summed by gene. With `csv` true, the probe-set CSV is
+/// at `<root>/probe_set.csv`.
+fn make_probe_af_quant(name: &str, csv: bool) -> PathBuf {
+    let root = make_af_quant(name, false);
+    let alevin = root.join("alevin");
+    let pe = probe_entries();
+    write_mtx(&alevin.join("probe_quants_mat.mtx"), PROBES.len(), &pe);
+    fs::write(
+        alevin.join("probe_quants_mat_cols.txt"),
+        PROBES.join("\n") + "\n",
+    )
+    .unwrap();
+    fs::copy(
+        alevin.join("quants_mat_rows.txt"),
+        alevin.join("probe_quants_mat_rows.txt"),
+    )
+    .unwrap();
+    let mut gene: HashMap<(usize, usize), f64> = HashMap::new();
+    for (i, j, v) in &pe {
+        let g = GENES
+            .iter()
+            .position(|g| *g == probe_gene(PROBES[*j]))
+            .unwrap();
+        *gene.entry((*i, g)).or_insert(0.0) += v;
+    }
+    let mut ge: Vec<(usize, usize, f64)> = gene.into_iter().map(|((i, j), v)| (i, j, v)).collect();
+    ge.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    write_mtx(&alevin.join("quants_mat.mtx"), GENES.len(), &ge);
+    fs::write(
+        root.join("quant.json"),
+        format!(
+            r#"{{"usa_mode": false, "num_genes": {}, "feature_axis": "probe", "probe_mtx": true, "num_probes": {}}}"#,
+            GENES.len(),
+            PROBES.len()
+        ),
+    )
+    .unwrap();
+    if csv {
+        write_probe_csv(&root.join("probe_set.csv"), true);
+    }
+    root
+}
+
+fn convert_probe(root: &Path, probe_set: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let out = root.join("probe_out.h5ad");
+    convert_probe_csr_to_anndata(root, &out, probe_set, ConvertOpts::default())?;
+    Ok(out)
+}
+
+#[test]
+fn probe_var_comes_from_the_probe_set_csv() {
+    let root = make_probe_af_quant("probe_var", true);
+    let out = convert_probe(&root, None).unwrap();
+    let adata = open(&out);
+    assert_eq!(adata.var_names().into_vec(), PROBES.to_vec());
+    let var = adata.read_var().unwrap();
+    let cols: Vec<&str> = var.get_column_names().iter().map(|c| c.as_str()).collect();
+    assert_eq!(cols, ["probe_id", "gene_ids", "gene_names", "region"]);
+    let ids = str_column(&var, "probe_id");
+    let genes = str_column(&var, "gene_ids");
+    let names = str_column(&var, "gene_names");
+    let region = str_column(&var, "region");
+    for (k, p) in PROBES.iter().enumerate() {
+        let row = PROBE_CSV.iter().find(|r| r.1 == *p).unwrap();
+        assert_eq!(ids[k].as_deref(), Some(*p));
+        assert_eq!(genes[k].as_deref(), Some(row.0));
+        assert_eq!(names[k].as_deref(), Some(row.4));
+        assert_eq!(region[k].as_deref(), Some(row.3));
+    }
+}
+
+#[test]
+fn probe_x_summed_by_gene_equals_gene_x_and_obs_is_the_same() {
+    let root = make_probe_af_quant("probe_sum", true);
+    let probe_out = convert_probe(&root, None).unwrap();
+    let gene_out = root.join("gene_out.h5ad");
+    convert_csr_to_anndata_with_opts(&root, &gene_out, ConvertOpts::default()).unwrap();
+
+    let pa = open(&probe_out);
+    let ga = open(&gene_out);
+    let px: CsrMatrix<f64> = pa.x().get().unwrap().unwrap();
+    let gx: CsrMatrix<f64> = ga.x().get().unwrap().unwrap();
+    let probe_genes = str_column(&pa.read_var().unwrap(), "gene_ids");
+    let gene_names = ga.var_names().into_vec();
+
+    let mut summed: HashMap<(usize, String), f64> = HashMap::new();
+    for (i, j, v) in px.triplet_iter() {
+        *summed
+            .entry((i, probe_genes[j].clone().unwrap()))
+            .or_insert(0.0) += v;
+    }
+    let gene: HashMap<(usize, String), f64> = gx
+        .triplet_iter()
+        .map(|(i, j, v)| ((i, gene_names[j].clone()), *v))
+        .collect();
+    assert_eq!(summed, gene, "probe X summed by gene_ids equals gene X");
+
+    assert_eq!(pa.obs_names().into_vec(), ga.obs_names().into_vec());
+    let (po, go) = (pa.read_obs().unwrap(), ga.read_obs().unwrap());
+    for c in ["sample_name", "cell_barcode"] {
+        assert_eq!(str_column(&po, c), str_column(&go, c), "obs {c}");
+    }
+}
+
+#[test]
+fn probe_names_come_from_gene_id_to_name_when_the_csv_has_none() {
+    let root = make_probe_af_quant("probe_noname", false);
+    let csv = root.join("other_dir_probe_set.csv");
+    write_probe_csv(&csv, false);
+    let out = convert_probe(&root, Some(&csv)).unwrap();
+    let var = open(&out).read_var().unwrap();
+    let genes = str_column(&var, "gene_ids");
+    let names = str_column(&var, "gene_names");
+    let expected = expected_names();
+    for k in 0..PROBES.len() {
+        let g = genes[k].as_deref().unwrap();
+        assert_eq!(names[k].as_deref(), expected[g], "name of {g}");
+    }
+    // G4 has no name in gene_id_to_name.tsv.
+    let g4 = PROBES.iter().position(|p| p.starts_with("G4|")).unwrap();
+    assert_eq!(names[g4], None);
+}
+
+#[test]
+fn probe_conversion_without_a_csv_names_the_path_it_tried() {
+    let root = make_probe_af_quant("probe_nocsv", false);
+    let err = convert_probe(&root, None).unwrap_err().to_string();
+    assert!(
+        err.contains(&root.join("probe_set.csv").display().to_string()),
+        "{err}"
+    );
+    let missing = root.join("no_such.csv");
+    let err = convert_probe(&root, Some(&missing))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no_such.csv"), "{err}");
+}
+
+#[test]
+fn a_matrix_probe_that_is_not_in_the_csv_is_an_error() {
+    let root = make_probe_af_quant("probe_missing", false);
+    let csv = root.join("probe_set.csv");
+    write_probe_csv(&csv, true);
+    let text = fs::read_to_string(&csv).unwrap();
+    let text: String = text
+        .lines()
+        .filter(|l| !l.contains("G4|Gene4|p1"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    fs::write(&csv, text).unwrap();
+    let err = convert_probe(&root, None).unwrap_err().to_string();
+    assert!(
+        err.contains("G4|Gene4|p1") && err.contains("1 of 6"),
+        "{err}"
+    );
+}
+
+#[test]
+fn probe_rows_must_be_the_gene_rows() {
+    let root = make_probe_af_quant("probe_rows", true);
+    let rows = root.join("alevin/probe_quants_mat_rows.txt");
+    let mut text = fs::read_to_string(&rows).unwrap();
+    text = text.replacen("S_1_A_", "S_2_B_", 1);
+    fs::write(&rows, text).unwrap();
+    let err = convert_probe(&root, None).unwrap_err().to_string();
+    assert!(err.contains("probe_quants_mat_rows.txt"), "{err}");
+}
+
+#[test]
+fn probe_sort_index_keeps_the_annotations_with_their_probe() {
+    let root = make_probe_af_quant("probe_sorted", true);
+    let out = root.join("probe_sorted.h5ad");
+    convert_probe_csr_to_anndata(&root, &out, None, ConvertOpts { sort_index: true }).unwrap();
+    let adata = open(&out);
+    let names = adata.var_names().into_vec();
+    let mut sorted = PROBES.map(String::from).to_vec();
+    sorted.sort();
+    assert_eq!(names, sorted);
+    let var = adata.read_var().unwrap();
+    let genes = str_column(&var, "gene_ids");
+    let region = str_column(&var, "region");
+    for (k, p) in names.iter().enumerate() {
+        let row = PROBE_CSV.iter().find(|r| r.1 == p.as_str()).unwrap();
+        assert_eq!(genes[k].as_deref(), Some(row.0), "gene of {p}");
+        assert_eq!(region[k].as_deref(), Some(row.3), "region of {p}");
+    }
+}
+
+#[test]
+fn probe_conversion_rejects_usa_mode() {
+    let root = make_probe_af_quant("probe_usa", true);
+    fs::write(
+        root.join("quant.json"),
+        r#"{"usa_mode": true, "num_genes": 4, "probe_mtx": true}"#,
+    )
+    .unwrap();
+    let err = convert_probe(&root, None).unwrap_err().to_string();
+    assert!(
+        err.contains("usa_mode") && err.contains("no USA mode"),
+        "{err}"
+    );
 }

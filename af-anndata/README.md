@@ -31,6 +31,43 @@ layers, and `X` is set to their sum, over a `var` axis of just the genes.
 Multiplexed runs, whose barcodes look like `<sample_name>_<CB>`, are split into
 separate `sample_name` and `cell_barcode` columns in `obs`.
 
+## Probe matrix
+
+`alevin-fry quant-probe --probe-mtx` (10x Flex) also writes a probe matrix,
+`alevin/probe_quants_mat.mtx` (cells x probes).
+`convert_probe_csr_to_anndata` converts it to a second file:
+
+| Input | Becomes |
+|---|---|
+| `alevin/probe_quants_mat.mtx` | `X` (cells x probes) |
+| `alevin/probe_quants_mat_rows.txt` | the `obs` index; it must be the same as `quants_mat_rows.txt` |
+| `alevin/probe_quants_mat_cols.txt` | the `var` index and `var["probe_id"]` |
+| the 10x probe-set CSV | `var["gene_ids"]`, `var["gene_names"]`, `var["region"]` |
+| `featureDump.txt`, `*.json` | `obs` columns and `uns`, as in the gene file |
+
+The CSV is the argument `probe_set`, or else `<af_quant>/probe_set.csv`.
+It is an error if there is no CSV, or if a matrix probe is not in the CSV.
+The CSV must have `probe_id` and `gene_id` columns.
+`gene_name` and `region` are optional; the other columns are not copied.
+If the CSV has no `gene_name` column, the names come from `gene_id_to_name.tsv`.
+The probe columns are in the order of the RAD header, not of the CSV, so join
+on `probe_id`, not on position.
+
+```rust
+use af_anndata::{convert_probe_csr_to_anndata, ConvertOpts};
+use std::path::Path;
+
+# fn main() -> anyhow::Result<()> {
+convert_probe_csr_to_anndata(
+    Path::new("af_quant"),
+    Path::new("af_quant/alevin/probe_quants.h5ad"),
+    Some(Path::new("probe_set.csv")),
+    ConvertOpts::default(),
+)?;
+# Ok(())
+# }
+```
+
 ## Installing
 
 ```toml
