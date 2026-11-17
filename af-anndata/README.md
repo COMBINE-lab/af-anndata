@@ -20,6 +20,10 @@ Point it at an `af_quant` directory and it produces one HDF5-backed AnnData file
 | `featureDump.txt` | per-cell QC metrics in `obs` |
 | `*.json` run metadata | `uns` entries |
 
+The gene names are joined onto the matrix columns by gene id (a left join).
+Ids in `gene_id_to_name.tsv` that are not matrix columns are ignored; a Flex
+index has such ids. A column with no name gets a missing value.
+
 In USA mode the feature axis holds unspliced, spliced and ambiguous counts for
 each gene. These are split into the `unspliced`, `spliced` and `ambiguous`
 layers, and `X` is set to their sum, over a `var` axis of just the genes.
