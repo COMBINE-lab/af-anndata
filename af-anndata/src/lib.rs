@@ -549,7 +549,7 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
             bail!(err);
         }
     };
-    col_df.set_column_names(&["gene_ids"])?;
+    col_df.set_column_names(&["gene_id"])?;
 
     // read the barcodes
     let mut row_df = match CsvReadOptions::default()
@@ -612,7 +612,7 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
         ncols
     };
     let gene_ids: Vec<String> = col_df
-        .column("gene_ids")?
+        .column("gene_id")?
         .str()?
         .iter()
         .take(ngenes)
