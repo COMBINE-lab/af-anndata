@@ -24,6 +24,10 @@ In USA mode the feature axis holds unspliced, spliced and ambiguous counts for
 each gene. These are split into the `unspliced`, `spliced` and `ambiguous`
 layers, and `X` is set to their sum, over a `var` axis of just the genes.
 
+All arrays are written with gzip (the HDF5 deflate filter), level 4. Every HDF5
+library has this filter, so h5py, anndata and R read the file without an extra
+plugin such as `hdf5plugin`.
+
 Multiplexed runs, whose barcodes look like `<sample_name>_<CB>`, are split into
 separate `sample_name` and `cell_barcode` columns in `obs`.
 

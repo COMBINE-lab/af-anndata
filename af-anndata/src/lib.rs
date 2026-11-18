@@ -40,6 +40,9 @@
 //! [simpleaf]: https://github.com/COMBINE-lab/simpleaf
 //! [AnnData]: https://anndata.readthedocs.io/en/stable/
 
+use anndata::backend::{
+    get_default_write_config, set_default_write_config, Compression, WriteConfig,
+};
 use anndata::data::array::dataframe::DataFrameIndex;
 use anndata::{reader::MMReader, s, AnnData, AnnDataOp, ArrayData, ArrayElemOp};
 use anndata_hdf5::H5;
@@ -324,13 +327,33 @@ pub fn convert_csr_to_anndata<P: AsRef<Path>>(root_path: P, output_path: P) -> a
     convert_csr_to_anndata_with_opts(root_path, output_path, ConvertOpts::default())
 }
 
+/// The compression of all arrays in the output file: gzip (HDF5 deflate filter)
+/// level 4. Every HDF5 library has deflate. The anndata-rs default is Blosc
+/// (HDF5 filter 32001) for numeric arrays, and h5py, anndata and R cannot read
+/// Blosc without an extra plugin (for example `hdf5plugin` in Python).
+const H5AD_COMPRESSION: Compression = Compression::Gzip(4);
+
 /// Convert an `af_quant` directory to an HDF5-backed AnnData file.
+///
+/// All arrays are written with gzip level 4. The anndata-rs write
+/// config is thread-local; this function sets it for the calling thread and
+/// puts back the previous config before it returns.
 pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
     root_path: P,
     output_path: P,
     opts: ConvertOpts,
 ) -> anyhow::Result<()> {
-    let root_path = root_path.as_ref();
+    let caller_config = get_default_write_config();
+    set_default_write_config(WriteConfig {
+        compression: Some(H5AD_COMPRESSION),
+        ..caller_config.clone()
+    });
+    let result = write_anndata(root_path.as_ref(), output_path.as_ref(), opts);
+    set_default_write_config(caller_config);
+    result
+}
+
+fn write_anndata(root_path: &Path, output_path: &Path, opts: ConvertOpts) -> anyhow::Result<()> {
     let json_path = PathBuf::from(&root_path);
 
     let mut gpl_path = json_path.clone();
@@ -603,7 +626,7 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
     };
 
     // make the AnnData object and populate it from the MMReader
-    let mut b = AnnData::<H5>::new(output_path.as_ref())?;
+    let mut b = AnnData::<H5>::new(output_path)?;
     r.finish(&b)?;
     info!("Reading MM into AnnData took {:#?}", sw.elapsed());
 
