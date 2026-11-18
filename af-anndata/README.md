@@ -15,10 +15,14 @@ Point it at an `af_quant` directory and it produces one HDF5-backed AnnData file
 |---|---|
 | `alevin/quants_mat.mtx` | `X` (and, in USA mode, the layers below) |
 | `alevin/quants_mat_rows.txt` | the `obs` index (cell barcodes) |
-| `alevin/quants_mat_cols.txt` | the `var` index (gene ids) |
-| `gene_id_to_name.tsv` | `var["gene_symbol"]`, if present |
+| `alevin/quants_mat_cols.txt` | the `var` index and `var["gene_ids"]` (gene ids) |
+| `gene_id_to_name.tsv` | `var["gene_names"]`, if present |
 | `featureDump.txt` | per-cell QC metrics in `obs` |
 | `*.json` run metadata | `uns` entries |
+
+The gene names are joined onto the matrix columns by gene id (a left join).
+Ids in `gene_id_to_name.tsv` that are not matrix columns are ignored; a Flex
+index has such ids. A column with no name gets a missing value.
 
 In USA mode the feature axis holds unspliced, spliced and ambiguous counts for
 each gene. These are split into the `unspliced`, `spliced` and `ambiguous`
@@ -27,11 +31,51 @@ layers, and `X` is set to their sum, over a `var` axis of just the genes.
 Multiplexed runs, whose barcodes look like `<sample_name>_<CB>`, are split into
 separate `sample_name` and `cell_barcode` columns in `obs`.
 
+## Probe matrix
+
+`alevin-fry quant-probe --probe-mtx` (10x Flex) also writes a probe matrix,
+`alevin/probe_quants_mat.mtx` (cells x probes).
+`convert_probe_csr_to_anndata` converts it to a second file:
+
+| Input | Becomes |
+|---|---|
+| `alevin/probe_quants_mat.mtx` | `X` (cells x probes) |
+| `alevin/probe_quants_mat_rows.txt` | the `obs` index; it must be the same as `quants_mat_rows.txt` |
+| `alevin/probe_quants_mat_cols.txt` | the `var` index (probe ids) |
+| the 10x probe-set CSV | all `var` columns, as in the CSV (for example `gene_id`, `probe_seq`, `probe_id`, `included`, `region`, `gene_name`) |
+| `featureDump.txt`, `*.json` | `obs` columns and `uns`, as in the gene file |
+
+The CSV is the argument `probe_set`, or else `<af_quant>/probe_set.csv`.
+It is an error if there is no CSV, or if a matrix probe is not in the CSV.
+`var` is the CSV as it is: every column with its name and the type that the
+CSV reader gives (`included` becomes a bool), and the rows of the matrix probes
+in matrix column order. The `#` lines before the header are skipped.
+The CSV must have a `probe_id` column, and a `probe_id` must not occur two times.
+The gene file uses `gene_ids` and `gene_names`; the probe file keeps the CSV
+names `gene_id` and `gene_name`.
+The probe columns are in the order of the RAD header, not of the CSV, so join
+on `probe_id`, not on position.
+
+```rust
+use af_anndata::{convert_probe_csr_to_anndata, ConvertOpts};
+use std::path::Path;
+
+# fn main() -> anyhow::Result<()> {
+convert_probe_csr_to_anndata(
+    Path::new("af_quant"),
+    Path::new("af_quant/alevin/probe_quants.h5ad"),
+    Some(Path::new("probe_set.csv")),
+    ConvertOpts::default(),
+)?;
+# Ok(())
+# }
+```
+
 ## Installing
 
 ```toml
 [dependencies]
-af-anndata = "0.5"
+af-anndata = "0.6"
 ```
 
 ## Usage
@@ -76,6 +120,19 @@ script only accepts HDF5 minor versions `{0,1,8,10,12,14}` and panics with
 `Invalid H5_VERSION: "2.2.0"`. The committed `Cargo.lock` therefore holds
 `hdf5-metno-src` at 0.10.2. This only bites builds that compile HDF5 from source;
 if you have a system HDF5, `hdf5-metno-sys` links it and never gets there.
+
+## Upgrading from 0.5 to 0.6
+
+The `var` columns have new names, the same names that pyroe `load_fry` uses:
+
+| 0.5 | 0.6 |
+|---|---|
+| `var["gene_id"]` | `var["gene_ids"]` |
+| `var["gene_symbol"]` | `var["gene_names"]` |
+
+Code that reads these columns must use the new names.
+The `obs` columns (`barcodes`, `cell_barcode`, `sample_name`, and the
+`featureDump.txt` metrics) do not change.
 
 ## Related projects
 

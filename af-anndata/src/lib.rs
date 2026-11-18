@@ -7,6 +7,10 @@
 //! `featureDump.txt` become `obs` columns, and the run's JSON metadata becomes
 //! `uns` entries.
 //!
+//! For a 10x Flex run of `alevin-fry quant-probe --probe-mtx`,
+//! [`convert_probe_csr_to_anndata`] writes the probe matrix to a second file,
+//! with the same `obs` and a `var` from the 10x probe-set CSV.
+//!
 //! ```no_run
 //! use af_anndata::{convert_csr_to_anndata_with_opts, ConvertOpts};
 //! use std::path::Path;
@@ -46,10 +50,10 @@ use anndata_hdf5::H5;
 use anyhow::{bail, Context};
 use polars::io::prelude::*;
 use polars::prelude::{
-    Column, CsvReadOptions, DataFrame, DataType, Field, IntoColumn, PolarsError, Schema, Series,
-    SortMultipleOptions,
+    Column, CsvReadOptions, DataFrame, DataType, Field, IdxCa, IdxSize, PolarsError, Schema,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{error, info, trace, warn};
@@ -226,8 +230,7 @@ fn set_x_layer<B: anndata::Backend>(b: &mut AnnData<B>, csr_in: CSRMatPack) -> a
 fn separate_usa_layers<B: anndata::Backend>(
     b: &mut AnnData<B>,
     row_df: &DataFrame,
-    col_df: &DataFrame,
-    var_df: Option<DataFrame>,
+    var_df: DataFrame,
 ) -> anyhow::Result<()> {
     let mut sw = libsw::Sw::new();
     sw.start()?;
@@ -241,12 +244,9 @@ fn separate_usa_layers<B: anndata::Backend>(
     let mut csr_zero = CSRMatPack::new(nr, ngenes);
 
     // Get the unspliced, spliced and ambiguous slices
-    let vars = col_df;
-
     let slice1: ArrayData = b.get_x().slice(s![.., 0..ngenes])?.unwrap();
     csr_zero = accumulate_layer(&slice1, csr_zero)?;
 
-    let var1 = vars.slice(0_i64, ngenes);
     info!("getting slice took {:#?}", sw.elapsed());
     sw.reset();
     sw.start()?;
@@ -266,16 +266,7 @@ fn separate_usa_layers<B: anndata::Backend>(
     sw.start()?;
 
     set_x_layer(b, csr_zero)?;
-
-    // populate with the gene id and gene symbol if we have it
-    // otherwise just set the gene name
-    if let Some(var_info) = var_df {
-        b.set_var(var_info)?;
-    } else {
-        let mut temp_var = var1.clone();
-        temp_var.set_column_names(&["gene_id"])?;
-        b.set_var(temp_var)?;
-    }
+    b.set_var(var_df)?;
 
     let layers = vec![
         ("spliced".to_owned(), slice1),
@@ -301,6 +292,69 @@ fn parse_multiplex_barcodes(obs_names: &[String]) -> Option<(Vec<String>, Vec<St
     }
 
     Some((sample_names, cell_barcodes))
+}
+
+/// Reads `gene_id_to_name.tsv`: two tab-separated columns (gene id, gene name),
+/// no header. Returns an error for a line that does not have two fields, or for
+/// an id that occurs more than one time.
+fn read_gene_id_to_name(path: &Path) -> anyhow::Result<HashMap<String, String>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    let mut names = HashMap::new();
+    for (i, line) in text.lines().enumerate() {
+        let Some((id, name)) = line.split_once('\t') else {
+            bail!(
+                "{} line {}: expected 2 tab-separated fields (gene id, gene name), found {:?}",
+                path.display(),
+                i + 1,
+                line
+            );
+        };
+        if name.contains('\t') {
+            bail!(
+                "{} line {}: expected 2 tab-separated fields (gene id, gene name), found more",
+                path.display(),
+                i + 1
+            );
+        }
+        if names.insert(id.to_string(), name.to_string()).is_some() {
+            bail!(
+                "{} line {}: the gene id {:?} occurs more than one time",
+                path.display(),
+                i + 1,
+                id
+            );
+        }
+    }
+    Ok(names)
+}
+
+/// Builds the `var` frame from the matrix column ids (`gene_ids`, in column
+/// order), then left-joins the names of `gene_id_to_name` onto them.
+///
+/// Ids in the name file that are not matrix columns are ignored. A Flex index
+/// has such ids: the genes of the probes that are not in the index. A column id
+/// that has no name gets a missing value, as a left join in pyroe `load_fry`.
+fn build_var_df(gene_ids: &[String], gene_id_to_name: Option<&Path>) -> anyhow::Result<DataFrame> {
+    let mut columns = vec![Column::new("gene_ids".into(), gene_ids)];
+    if let Some(path) = gene_id_to_name {
+        let names = read_gene_id_to_name(path)?;
+        let symbols: Vec<Option<&str>> = gene_ids
+            .iter()
+            .map(|id| names.get(id).map(String::as_str))
+            .collect();
+        let n_missing = symbols.iter().filter(|s| s.is_none()).count();
+        if n_missing > 0 {
+            warn!(
+                "{} of {} matrix columns have no name in {}; their gene_names value is missing",
+                n_missing,
+                gene_ids.len(),
+                path.display()
+            );
+        }
+        columns.push(Column::new("gene_names".into(), symbols));
+    }
+    Ok(DataFrame::new(gene_ids.len(), columns)?)
 }
 
 /// Options controlling how an `af_quant` directory is converted to AnnData.
@@ -330,7 +384,134 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
     output_path: P,
     opts: ConvertOpts,
 ) -> anyhow::Result<()> {
+    write_anndata(root_path.as_ref(), output_path.as_ref(), opts, None)
+}
+
+/// The file name of the 10x probe-set CSV in an `af_quant` directory.
+pub const PROBE_SET_FILE: &str = "probe_set.csv";
+
+/// Convert the probe matrix of an `af_quant` directory to an HDF5-backed
+/// AnnData file.
+///
+/// The input is the output of `alevin-fry quant-probe --probe-mtx`:
+/// `alevin/probe_quants_mat.mtx` (cells x probes) and its rows and cols files.
+/// `obs` is the same as in the gene file of [`convert_csr_to_anndata_with_opts`].
+/// `var` is the 10x probe-set CSV as it is: all its columns, with their names
+/// and the types that the CSV reader gives, and the rows of the matrix probes
+/// in matrix column order (joined on `probe_id`). The `#` lines before the
+/// header are skipped.
+///
+/// The CSV is `probe_set`, or else `<root_path>/probe_set.csv`. It is an error
+/// if neither exists, or if a matrix probe is not in the CSV.
+pub fn convert_probe_csr_to_anndata<P: AsRef<Path>>(
+    root_path: P,
+    output_path: P,
+    probe_set: Option<&Path>,
+    opts: ConvertOpts,
+) -> anyhow::Result<()> {
     let root_path = root_path.as_ref();
+    let probe_set = find_probe_set(root_path, probe_set)?;
+    write_anndata(root_path, output_path.as_ref(), opts, Some(&probe_set))
+}
+
+/// Returns the probe-set CSV: `given`, or else `<root_path>/probe_set.csv`.
+fn find_probe_set(root_path: &Path, given: Option<&Path>) -> anyhow::Result<PathBuf> {
+    if let Some(p) = given {
+        if !p.is_file() {
+            bail!("the probe-set CSV {} does not exist", p.display());
+        }
+        return Ok(p.to_path_buf());
+    }
+    let p = root_path.join(PROBE_SET_FILE);
+    if !p.is_file() {
+        bail!(
+            "no probe-set CSV was given, and {} does not exist; give the 10x probe-set CSV of the run",
+            p.display()
+        );
+    }
+    Ok(p)
+}
+
+/// Reads the table of a 10x probe-set CSV. The `#` lines before the header are
+/// skipped.
+fn read_probe_set(path: &Path) -> anyhow::Result<DataFrame> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    let n_hash_lines = text.lines().take_while(|l| l.starts_with('#')).count();
+    let table = CsvReadOptions::default()
+        .with_has_header(true)
+        .with_skip_lines(n_hash_lines)
+        .with_raise_if_empty(true)
+        .try_into_reader_with_file_path(Some(path.to_path_buf()))?
+        .finish()
+        .with_context(|| format!("could not read the table of {}", path.display()))?;
+    if table.column("probe_id").is_err() {
+        bail!(
+            "{} has no `probe_id` column; its columns are {:?}",
+            path.display(),
+            table.get_column_names()
+        );
+    }
+    Ok(table)
+}
+
+/// Makes the probe `var`: the rows of the probe-set CSV for the matrix probes
+/// `probe_ids`, in that order, with all CSV columns as they are.
+fn probe_var(probe_ids: &[String], probe_set: &Path) -> anyhow::Result<DataFrame> {
+    let table = read_probe_set(probe_set)?;
+    let csv_ids = table.column("probe_id")?.str()?;
+    let mut row_of = HashMap::with_capacity(csv_ids.len());
+    for (r, id) in csv_ids.iter().enumerate() {
+        let id = id.with_context(|| {
+            format!("{} data row {} has no probe_id", probe_set.display(), r + 1)
+        })?;
+        if row_of.insert(id, r as IdxSize).is_some() {
+            bail!(
+                "{}: the probe_id {:?} occurs more than one time",
+                probe_set.display(),
+                id
+            );
+        }
+    }
+    let missing: Vec<&str> = probe_ids
+        .iter()
+        .filter(|id| !row_of.contains_key(id.as_str()))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "{} of {} matrix probes are not in {} (the first ones: {:?}); give the probe-set CSV that the index was made from",
+            missing.len(),
+            probe_ids.len(),
+            probe_set.display(),
+            &missing[..missing.len().min(5)]
+        );
+    }
+    let rows: Vec<IdxSize> = probe_ids.iter().map(|id| row_of[id.as_str()]).collect();
+    Ok(table.take(&IdxCa::from_vec("rows".into(), rows))?)
+}
+
+/// Writes the gene matrix (`probe_set` is `None`) or the probe matrix of
+/// `alevin-fry quant-probe --probe-mtx` (`probe_set` is the 10x probe-set CSV).
+fn write_anndata(
+    root_path: &Path,
+    output_path: &Path,
+    opts: ConvertOpts,
+    probe_set: Option<&Path>,
+) -> anyhow::Result<()> {
+    let (mtx_file, rows_file, cols_file) = if probe_set.is_some() {
+        (
+            "probe_quants_mat.mtx",
+            "probe_quants_mat_rows.txt",
+            "probe_quants_mat_cols.txt",
+        )
+    } else {
+        (
+            "quants_mat.mtx",
+            "quants_mat_rows.txt",
+            "quants_mat_cols.txt",
+        )
+    };
     let json_path = PathBuf::from(&root_path);
 
     let mut gpl_path = json_path.clone();
@@ -353,13 +534,13 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
 
     let alevin_path = root_path.join("alevin");
     let mut p = PathBuf::from(&alevin_path);
-    p.push("quants_mat.mtx");
+    p.push(mtx_file);
 
     let mut colpath = PathBuf::from(&alevin_path);
-    colpath.push("quants_mat_cols.txt");
+    colpath.push(cols_file);
 
     let mut rowpath = PathBuf::from(&alevin_path);
-    rowpath.push("quants_mat_rows.txt");
+    rowpath.push(rows_file);
 
     let mut gene_id_to_name_path = PathBuf::from(&root_path);
     gene_id_to_name_path.push("gene_id_to_name.tsv");
@@ -405,8 +586,8 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
     let gene_id_to_name_path = gene_id_to_name_path
         .is_file()
         .then_some(gene_id_to_name_path);
-    // otherwise, wan the user
-    if gene_id_to_name_path.is_none() {
+    // otherwise, wan the user (a probe run can take the names from its CSV)
+    if gene_id_to_name_path.is_none() && probe_set.is_none() {
         warn!(
             "Could not find the `gene_id_to_name` file, so only gene IDs and not symbols will be present in `var`"
         );
@@ -508,7 +689,7 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
         .with_has_header(false)
         .with_parse_options(parse_opts.clone())
         .with_raise_if_empty(true)
-        .try_into_reader_with_file_path(Some(rowpath))?
+        .try_into_reader_with_file_path(Some(rowpath.clone()))?
         .finish()
     {
         Ok(dframe) => dframe,
@@ -548,62 +729,60 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
         .map(|s| s.to_string())
         .collect();
 
-    // read the gene_id_to_name file
-    let var_df = if let Some(id_to_name) = gene_id_to_name_path {
-        // if we had the gene id to name file name, then we want to read it in, but
-        // we also want to re-order the rows to match with the row-labels given in
-        // the input file.
-        let ordered_ids = col_df.column("gene_id")?.as_materialized_series().str()?;
-        // read through the gene names in order, and build a hash map from gene_id to
-        // rank (corresponding column) of the count matrix
-        let gene_rank_hash = std::collections::HashMap::<&str, u64>::from_iter(
-            ordered_ids.iter().enumerate().map(|(i, s)| {
-                (
-                    s.expect("should not be missing a gene id in the `quants_mat_cols` file"),
-                    i as u64,
-                )
-            }),
-        );
-
-        // read the gene id to name file
-        let mut vd = CsvReadOptions::default()
-            .with_has_header(false)
-            .with_parse_options(parse_opts)
-            .with_raise_if_empty(true)
-            .try_into_reader_with_file_path(Some(id_to_name))?
-            .finish()?;
-
-        // create a column that lists the rank for each gene
-        // *in the order it appears in the gene id to name list*.
-        // we will use this to re-order the rows of the gene id to name
-        // dataframe.
-        let rank_vec: Series = Series::from_iter(
-            vd.select_at_idx(0)
-                .expect("0th column of gene id to gene name DataFrame should exist")
-                .as_materialized_series()
-                .str()?
-                .iter()
-                .map(|s| {
-                    gene_rank_hash
-                        [s.expect("should not be a missing gene id in the `gene_id_to_name` file")]
-                }),
-        );
-        // add the rank column to the Data Frame
-        vd.with_column(rank_vec.into_column())?;
-        // set the column names
-        vd.set_column_names(&["gene_id", "gene_symbol", "gene_rank"])?;
-        // reorder the rows to put the ranks in order, bringing the ids and names
-        // with them.
-        vd.sort_in_place(["gene_rank"], SortMultipleOptions::default())?;
-        // we no longer need the rank column
-        vd.drop_in_place("gene_rank")?;
-        Some(vd)
+    // Build `var` from the matrix columns. In USA mode the columns are the
+    // spliced, unspliced and ambiguous blocks of the same genes, so the gene
+    // ids are the first third of the columns.
+    let ncols = col_df.height();
+    let ngenes = if usa_mode {
+        if ncols % 3 != 0 {
+            bail!(
+                "USA mode needs a multiple of 3 columns in quants_mat_cols.txt, found {}",
+                ncols
+            );
+        }
+        ncols / 3
     } else {
-        None
+        ncols
+    };
+    let gene_ids: Vec<String> = col_df
+        .column("gene_id")?
+        .str()?
+        .iter()
+        .take(ngenes)
+        .enumerate()
+        .map(|(i, s)| {
+            s.map(str::to_string)
+                .with_context(|| format!("quants_mat_cols.txt line {} is empty", i + 1))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    // In a probe run, usa_mode is false, so `gene_ids` are all the probe ids.
+    let var_df = if let Some(probe_set) = probe_set {
+        if usa_mode {
+            bail!(
+                "{} has usa_mode true, but a probe matrix has no USA mode",
+                quant_path.display()
+            );
+        }
+        // obs comes from featureDump.txt, which follows the gene rows.
+        let gene_rows = alevin_path.join("quants_mat_rows.txt");
+        let same_rows = std::fs::read(&rowpath)
+            .with_context(|| format!("could not read {}", rowpath.display()))?
+            == std::fs::read(&gene_rows)
+                .with_context(|| format!("could not read {}", gene_rows.display()))?;
+        if !same_rows {
+            bail!(
+                "{} is not the same as {}, so featureDump.txt does not describe its rows",
+                rowpath.display(),
+                gene_rows.display()
+            );
+        }
+        probe_var(&gene_ids, probe_set)?
+    } else {
+        build_var_df(&gene_ids, gene_id_to_name_path.as_deref())?
     };
 
     // make the AnnData object and populate it from the MMReader
-    let mut b = AnnData::<H5>::new(output_path.as_ref())?;
+    let mut b = AnnData::<H5>::new(output_path)?;
     r.finish(&b)?;
     info!("Reading MM into AnnData took {:#?}", sw.elapsed());
 
@@ -761,29 +940,13 @@ pub fn convert_csr_to_anndata_with_opts<P: AsRef<Path>>(
     }
     b.set_uns(uns).context("failed to set \"uns\" data")?;
 
-    let ngenes;
     if usa_mode {
-        ngenes = b.n_vars() / 3;
-        separate_usa_layers(&mut b, &row_df, &col_df, var_df)?;
+        separate_usa_layers(&mut b, &row_df, var_df)?;
     } else {
-        ngenes = b.n_vars();
-        if let Some(var_info) = var_df {
-            b.set_var(var_info)?;
-        } else {
-            b.set_var(col_df.clone())?;
-        }
+        b.set_var(var_df)?;
         b.set_obs(row_df.clone())?;
     }
 
-    let gene_ids: Vec<String> = col_df
-        .column("gene_id")?
-        .str()
-        .unwrap()
-        .iter()
-        .flatten()
-        .take(ngenes)
-        .map(|s| s.to_string())
-        .collect();
     let var_index = DataFrameIndex::from(gene_ids.clone());
     b.set_var_names(var_index)?;
 
@@ -835,7 +998,89 @@ fn sort_by_index<B: anndata::Backend>(
 
 #[cfg(test)]
 mod tests {
-    use super::{argsort, parse_multiplex_barcodes};
+    use super::{argsort, parse_multiplex_barcodes, probe_var, read_gene_id_to_name};
+
+    const PROBE_HEADER: &str = "#probe_set_file_format=3.0\ngene_id,probe_id,included\n";
+
+    fn probe_var_err(test: &str, csv: &str) -> String {
+        let p = name_file(test, csv);
+        let ids = vec!["P1".to_string(), "P2".to_string()];
+        let err = probe_var(&ids, &p).unwrap_err().to_string();
+        std::fs::remove_file(&p).unwrap();
+        err
+    }
+
+    #[test]
+    fn probe_set_needs_a_probe_id_column() {
+        let err = probe_var_err("cols", "gene_id,probe\nG1,P1\nG2,P2\n");
+        assert!(err.contains("no `probe_id` column"), "{err}");
+    }
+
+    #[test]
+    fn probe_set_rejects_a_duplicate_probe_id() {
+        let csv = format!("{PROBE_HEADER}G1,P1,TRUE\nG2,P2,TRUE\nG3,P1,TRUE\n");
+        let err = probe_var_err("dupprobe", &csv);
+        assert!(err.contains("\"P1\" occurs more than one time"), "{err}");
+    }
+
+    #[test]
+    fn probe_var_is_the_csv_rows_of_the_matrix_probes_in_matrix_order() {
+        let csv = format!("{PROBE_HEADER}G2,P2,TRUE\nGX,PX,FALSE\nG1,P1,TRUE\n");
+        let p = name_file("asis", &csv);
+        let ids = vec!["P1".to_string(), "P2".to_string()];
+        let var = probe_var(&ids, &p).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        let cols: Vec<&str> = var.get_column_names().iter().map(|c| c.as_str()).collect();
+        assert_eq!(cols, ["gene_id", "probe_id", "included"]);
+        let genes: Vec<Option<&str>> = var
+            .column("gene_id")
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .collect();
+        assert_eq!(genes, [Some("G1"), Some("G2")]);
+    }
+
+    fn name_file(test: &str, text: &str) -> std::path::PathBuf {
+        let p =
+            std::env::temp_dir().join(format!("af_anndata_{}_{}.tsv", test, std::process::id()));
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    #[test]
+    fn gene_id_to_name_reads_two_columns() {
+        let p = name_file("ok", "G1\tA\nG2\tB\n");
+        let names = read_gene_id_to_name(&p).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names["G2"], "B");
+    }
+
+    #[test]
+    fn gene_id_to_name_rejects_a_duplicate_id() {
+        let p = name_file("dup", "G1\tA\nG1\tB\n");
+        let err = read_gene_id_to_name(&p).unwrap_err().to_string();
+        std::fs::remove_file(&p).unwrap();
+        assert!(
+            err.contains("line 2") && err.contains("more than one time"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn gene_id_to_name_rejects_a_line_without_two_fields() {
+        let p = name_file("one", "G1\tA\nG2\n");
+        let err = read_gene_id_to_name(&p).unwrap_err().to_string();
+        std::fs::remove_file(&p).unwrap();
+        assert!(err.contains("line 2"), "{err}");
+
+        let p = name_file("three", "G1\tA\tX\n");
+        let err = read_gene_id_to_name(&p).unwrap_err().to_string();
+        std::fs::remove_file(&p).unwrap();
+        assert!(err.contains("line 1"), "{err}");
+    }
 
     #[test]
     fn argsort_orders_by_key_not_position() {
