@@ -7,30 +7,45 @@
 //! anndata-rs writes) and the values, and pass 2 puts each entry in its row.
 //! X is written with the same datasets, types, chunks and attributes as
 //! anndata-rs `CsrMatrix::write`, without the copy that it makes of `indices`.
+//!
+//! A plain file is read by several threads at the same time, each one over a
+//! byte range of the entry lines, in both passes. A gzip file is one stream
+//! that cannot be split, so one thread reads it.
 use anndata::backend::{get_default_write_config, AttributeOp, BackendData, GroupOp, Value};
 use anndata::{AnnData, Backend};
 use anndata_hdf5::H5;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use flate2::read::MultiGzDecoder;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::marker::PhantomData;
+use std::ops::Range;
 use std::path::Path;
 use std::str::FromStr;
 
-/// The same gzip detection as anndata-rs `MMReader`.
-fn open(path: &Path) -> Result<Box<dyn BufRead>> {
+/// The most threads that read one file.
+const MAX_THREADS: usize = 4;
+
+/// Opens `path`, with the same gzip detection as anndata-rs `MMReader`;
+/// returns the reader and `true` for a gzip file.
+fn open(path: &Path) -> Result<(Box<dyn BufRead>, bool)> {
     let file = || File::open(path).with_context(|| format!("cannot open {}", path.display()));
     Ok(if MultiGzDecoder::new(file()?).header().is_some() {
-        Box::new(BufReader::with_capacity(
-            1 << 20,
-            MultiGzDecoder::new(file()?),
-        ))
+        let gz = MultiGzDecoder::new(file()?);
+        (Box::new(BufReader::with_capacity(1 << 20, gz)), true)
     } else {
-        Box::new(BufReader::with_capacity(1 << 20, file()?))
+        (Box::new(BufReader::with_capacity(1 << 20, file()?)), false)
     })
 }
 
-#[derive(PartialEq)]
+/// Opens the byte range `r` of the plain file `path`.
+fn open_range(path: &Path, r: &Range<u64>) -> Result<BufReader<std::io::Take<File>>> {
+    let mut f = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    f.seek(SeekFrom::Start(r.start))?;
+    Ok(BufReader::with_capacity(1 << 20, f.take(r.end - r.start)))
+}
+
+#[derive(Clone, Copy, PartialEq)]
 struct Header {
     nrows: usize,
     ncols: usize,
@@ -41,12 +56,12 @@ struct Header {
     symmetric: bool,
 }
 
-/// Reads the banner and the size line. Only `coordinate {real,integer}
-/// {general,symmetric}` is accepted, as in `MMReader`; alevin-fry writes
-/// `real general`.
-fn read_header(r: &mut dyn BufRead, line: &mut Vec<u8>) -> Result<Header> {
+/// Reads the banner and the size line; returns the header and the number of
+/// bytes that it has. Only `coordinate {real,integer} {general,symmetric}` is
+/// accepted, as in `MMReader`; alevin-fry writes `real general`.
+fn read_header(r: &mut dyn BufRead, line: &mut Vec<u8>) -> Result<(Header, u64)> {
     line.clear();
-    r.read_until(b'\n', line)?;
+    let mut bytes = r.read_until(b'\n', line)? as u64;
     let banner = String::from_utf8_lossy(line).to_lowercase();
     let toks: Vec<&str> = banner.split_ascii_whitespace().collect();
     let (integer, symmetric) = match toks.as_slice() {
@@ -57,10 +72,9 @@ fn read_header(r: &mut dyn BufRead, line: &mut Vec<u8>) -> Result<Header> {
     };
     loop {
         line.clear();
-        ensure!(
-            r.read_until(b'\n', line)? > 0,
-            "MatrixMarket file has no size line"
-        );
+        let n = r.read_until(b'\n', line)?;
+        ensure!(n > 0, "MatrixMarket file has no size line");
+        bytes += n as u64;
         if line[0] != b'%' && !line.iter().all(u8::is_ascii_whitespace) {
             break;
         }
@@ -74,13 +88,33 @@ fn read_header(r: &mut dyn BufRead, line: &mut Vec<u8>) -> Result<Header> {
         v.len() == 3,
         "MatrixMarket size line must have 3 fields, not {v:?}"
     );
-    Ok(Header {
+    let h = Header {
         nrows: v[0],
         ncols: v[1],
         entries: v[2],
         integer,
         symmetric,
-    })
+    };
+    Ok((h, bytes))
+}
+
+/// Splits the entry lines of a plain file, the bytes `start..len`, into
+/// `n` ranges. Each cut moves forward to the start of the next line, so
+/// each line is in one range; a range can be empty.
+fn split_lines(path: &Path, start: u64, len: u64, n: usize) -> Result<Vec<Range<u64>>> {
+    let mut f = BufReader::new(File::open(path)?);
+    let mut line = Vec::new();
+    let mut cuts = vec![start];
+    for k in 1..n {
+        let raw = start + (len - start) * k as u64 / n as u64;
+        // `raw - 1` is in the file: the size line ends at `start - 1`.
+        f.seek(SeekFrom::Start(raw - 1))?;
+        line.clear();
+        let cut = raw - 1 + f.read_until(b'\n', &mut line)? as u64;
+        cuts.push(cut.max(cuts[k - 1]));
+    }
+    cuts.push(len);
+    Ok(cuts.windows(2).map(|w| w[0]..w[1]).collect())
 }
 
 /// Skips ASCII whitespace, the one set of separators of this reader.
@@ -137,96 +171,182 @@ fn parse_row_col(b: &[u8], h: &Header) -> Result<(usize, usize, usize)> {
     Ok((row, col, i))
 }
 
-/// Calls `f` for each entry line; fails unless there are exactly `entries` lines.
-fn for_each_entry(
-    r: &mut dyn BufRead,
-    line: &mut Vec<u8>,
-    entries: usize,
-    mut f: impl FnMut(&[u8]) -> Result<()>,
-) -> Result<()> {
+/// Calls `f` for each entry line (a line that is not blank); returns the
+/// number of entry lines.
+fn for_each_line(r: &mut dyn BufRead, mut f: impl FnMut(&[u8]) -> Result<()>) -> Result<usize> {
+    let mut line = Vec::with_capacity(128);
     let mut seen = 0usize;
     loop {
         line.clear();
-        if r.read_until(b'\n', line)? == 0 {
-            break;
+        if r.read_until(b'\n', &mut line)? == 0 {
+            return Ok(seen);
         }
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        ensure!(
-            seen < entries,
-            "MatrixMarket file has more than {entries} entries"
-        );
-        f(line)?;
+        f(&line)?;
         seen += 1;
     }
-    ensure!(
-        seen == entries,
-        "MatrixMarket header gives {entries} entries, the file has {seen}"
-    );
-    Ok(())
 }
 
-/// Pass 1: returns the header and the CSR row offsets.
-fn count_rows(path: &Path) -> Result<(Header, Vec<usize>)> {
-    let mut line = Vec::with_capacity(128);
-    let mut r = open(path)?;
-    let h = read_header(&mut r, &mut line)?;
-    let mut indptr = vec![0usize; h.nrows + 1];
-    for_each_entry(&mut r, &mut line, h.entries, |b| {
+/// Runs `f(k)` for each `k` in `0..n`, each in its own thread; returns the
+/// results in the order of `k`, or the first error in that order.
+fn run_parallel<R: Send>(n: usize, f: impl Fn(usize) -> Result<R> + Sync) -> Result<Vec<R>> {
+    std::thread::scope(|s| {
+        let f = &f;
+        let threads: Vec<_> = (0..n).map(|k| s.spawn(move || f(k))).collect();
+        threads
+            .into_iter()
+            .map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    })
+}
+
+/// Where the entry lines are.
+enum Body {
+    /// Byte ranges of a plain file, one for each thread.
+    Plain(Vec<Range<u64>>),
+    /// The one stream of a gzip file.
+    Gzip,
+}
+
+/// The result of pass 1.
+struct Counts {
+    h: Header,
+    /// The number of bytes of the banner, the comments and the size line.
+    start: u64,
+    /// The size of the file.
+    len: u64,
+    body: Body,
+    /// `parts[k][row]`: the entries of `row` in part `k` of the body.
+    parts: Vec<Vec<u32>>,
+    /// The CSR row offsets.
+    indptr: Vec<usize>,
+}
+
+/// Pass 1 over one part: the entries of each row, and the number of entry lines.
+fn count_part(r: &mut dyn BufRead, h: &Header) -> Result<(Vec<u32>, usize)> {
+    let mut counts = vec![0u32; h.nrows];
+    let mut add = |row: usize| -> Result<()> {
+        counts[row] = counts[row]
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("row {row} has more than {} entries", u32::MAX))?;
+        Ok(())
+    };
+    let seen = for_each_line(r, |b| {
         if h.symmetric {
-            let (row, col, _) = parse_row_col(b, &h)?;
-            indptr[row + 1] += 1;
+            let (row, col, _) = parse_row_col(b, h)?;
+            add(row)?;
             if row != col {
-                indptr[col + 1] += 1;
+                add(col)?;
             }
         } else {
-            indptr[parse_index(b, 0, h.nrows, "row")?.0 + 1] += 1;
+            add(parse_index(b, 0, h.nrows, "row")?.0)?;
         }
         Ok(())
     })?;
-    for i in 0..h.nrows {
-        indptr[i + 1] += indptr[i];
-    }
-    Ok((h, indptr))
+    Ok((counts, seen))
 }
 
-/// Pass 2: puts each entry in its row and writes the CSR arrays as `X` of
-/// `store`. `I` is the index type on disk, `T` the value type.
-fn fill_and_write<I, T>(
-    path: &Path,
-    h: &Header,
-    indptr: Vec<usize>,
-    store: &<H5 as Backend>::Store,
-) -> Result<()>
+/// Pass 1: counts the entries of each row, with `threads` threads for a plain file.
+fn count_rows(path: &Path, threads: usize) -> Result<Counts> {
+    let (mut r, gzip) = open(path)?;
+    let (h, start) = read_header(&mut r, &mut Vec::new())?;
+    let len = std::fs::metadata(path)?.len();
+    let (body, counted) = if gzip {
+        (Body::Gzip, vec![count_part(&mut r, &h)?])
+    } else {
+        drop(r);
+        let ranges = split_lines(path, start, len, threads)?;
+        let counted = run_parallel(ranges.len(), |k| {
+            count_part(&mut open_range(path, &ranges[k])?, &h)
+        })?;
+        (Body::Plain(ranges), counted)
+    };
+    let seen: usize = counted.iter().map(|c| c.1).sum();
+    ensure!(
+        seen == h.entries,
+        "MatrixMarket header gives {} entries, the file has {seen}",
+        h.entries
+    );
+    let parts: Vec<Vec<u32>> = counted.into_iter().map(|c| c.0).collect();
+    let mut indptr = vec![0usize; h.nrows + 1];
+    for row in 0..h.nrows {
+        let n: usize = parts.iter().map(|p| p[row] as usize).sum();
+        indptr[row + 1] = indptr[row] + n;
+    }
+    Ok(Counts {
+        h,
+        start,
+        len,
+        body,
+        parts,
+        indptr,
+    })
+}
+
+/// The `indices` and `data` arrays, written by many threads at the same
+/// time, each thread at its own slots.
+struct Slots<'a, I, T> {
+    indices: *mut I,
+    data: *mut T,
+    len: usize,
+    _arrays: PhantomData<(&'a mut [I], &'a mut [T])>,
+}
+
+// SAFETY: the threads write different slots only (see `fill_part`), and
+// the element types can be sent to another thread.
+unsafe impl<I: Send, T: Send> Sync for Slots<'_, I, T> {}
+
+impl<'a, I, T> Slots<'a, I, T> {
+    fn new(indices: &'a mut [I], data: &'a mut [T]) -> Self {
+        assert_eq!(indices.len(), data.len());
+        Slots {
+            indices: indices.as_mut_ptr(),
+            data: data.as_mut_ptr(),
+            len: indices.len(),
+            _arrays: PhantomData,
+        }
+    }
+
+    /// Writes slot `p`.
+    ///
+    /// # Safety
+    ///
+    /// No other thread reads or writes slot `p` at the same time.
+    unsafe fn write(&self, p: usize, index: I, value: T) {
+        assert!(p < self.len, "slot {p} is not in 0..{}", self.len);
+        // SAFETY: `p` is in the arrays, and the caller makes sure that no
+        // other thread uses slot `p`.
+        unsafe {
+            self.indices.add(p).write(index);
+            self.data.add(p).write(value);
+        }
+    }
+}
+
+/// Pass 2 over part `k`: puts each entry in its row. In each row, part `k`
+/// owns the slots after those of parts `0..k`, so the entries of a row stay
+/// in file order and the parts write different slots.
+fn fill_part<I, T>(r: &mut dyn BufRead, c: &Counts, k: usize, slots: &Slots<I, T>) -> Result<()>
 where
-    I: BackendData + Copy + Default + Ord + TryFrom<usize>,
-    T: BackendData + Copy + Default + FromStr,
+    I: TryFrom<usize>,
+    T: Copy + FromStr,
 {
-    let nnz = indptr[h.nrows];
-    let mut indices = vec![I::default(); nnz];
-    let mut data = vec![T::default(); nnz];
-    let mut cursor = indptr[..h.nrows].to_vec();
+    let (h, mine) = (&c.h, &c.parts[k]);
+    let mut filled = vec![0u32; h.nrows];
     let mut put = |row: usize, col: usize, val: T| -> Result<()> {
-        let p = cursor[row];
-        ensure!(
-            p < indptr[row + 1],
-            "row {row} has more entries than in pass 1"
-        );
-        indices[p] = I::try_from(col).map_err(|_| anyhow!("column {col} overflows"))?;
-        data[p] = val;
-        cursor[row] += 1;
+        let f = filled[row];
+        ensure!(f < mine[row], "row {row} has more entries than in pass 1");
+        let before: usize = c.parts[..k].iter().map(|p| p[row] as usize).sum();
+        let index = I::try_from(col).map_err(|_| anyhow!("column {col} overflows"))?;
+        // SAFETY: part `k` writes only the slots `indptr[row] + before + 0..mine[row]`
+        // of `row` (checked above); the slots of the other parts do not overlap them.
+        unsafe { slots.write(c.indptr[row] + before + f as usize, index, val) };
+        filled[row] = f + 1;
         Ok(())
     };
-
-    let mut line = Vec::with_capacity(128);
-    let mut r = open(path)?;
-    ensure!(
-        read_header(&mut r, &mut line)? == *h,
-        "{} changed after pass 1",
-        path.display()
-    );
-    for_each_entry(&mut r, &mut line, h.entries, |b| {
+    for_each_line(r, |b| {
         let (row, col, i) = parse_row_col(b, h)?;
         let i = skip_blank(b, i);
         let j = i + b[i..]
@@ -249,17 +369,24 @@ where
         Ok(())
     })?;
     // A row with fewer entries than in pass 1 would keep slots with no value.
-    if let Some(row) = (0..h.nrows).find(|&r| cursor[r] != indptr[r + 1]) {
-        bail!(
-            "{} changed after pass 1: row {row} has fewer entries than in pass 1",
-            path.display()
-        );
+    if let Some(row) = (0..h.nrows).find(|&r| filled[r] != mine[r]) {
+        bail!("row {row} has fewer entries than in pass 1");
     }
+    Ok(())
+}
 
-    // A row whose entries are not in column order is sorted; a duplicate is an error.
+/// Sorts each row of `rows` that is not in column order; a duplicate is an
+/// error. `indices` and `data` start at the first slot of `rows`.
+fn sort_block<I: Copy + Ord, T: Copy>(
+    indptr: &[usize],
+    rows: Range<usize>,
+    indices: &mut [I],
+    data: &mut [T],
+) -> Result<()> {
+    let base = indptr[rows.start];
     let mut tmp: Vec<(I, T)> = Vec::new();
-    for row in 0..h.nrows {
-        let (lo, hi) = (indptr[row], indptr[row + 1]);
+    for row in rows {
+        let (lo, hi) = (indptr[row] - base, indptr[row + 1] - base);
         if indices[lo..hi].windows(2).all(|w| w[0] < w[1]) {
             continue;
         }
@@ -280,8 +407,80 @@ where
             data[lo + k] = v;
         }
     }
+    Ok(())
+}
 
-    let indptr: Vec<I> = indptr
+/// Sorts the rows in `threads` blocks of rows, each in its own thread.
+fn sort_rows<I, T>(
+    indptr: &[usize],
+    mut indices: &mut [I],
+    mut data: &mut [T],
+    threads: usize,
+) -> Result<()>
+where
+    I: Copy + Ord + Send,
+    T: Copy + Send,
+{
+    let nrows = indptr.len() - 1;
+    let mut blocks = Vec::with_capacity(threads);
+    let mut lo = 0;
+    for k in 1..=threads {
+        let hi = nrows * k / threads;
+        let n = indptr[hi] - indptr[lo];
+        let (i, rest_i) = std::mem::take(&mut indices).split_at_mut(n);
+        let (d, rest_d) = std::mem::take(&mut data).split_at_mut(n);
+        (indices, data) = (rest_i, rest_d);
+        blocks.push((lo..hi, i, d));
+        lo = hi;
+    }
+    std::thread::scope(|s| {
+        let threads: Vec<_> = blocks
+            .into_iter()
+            .map(|(rows, i, d)| s.spawn(move || sort_block(indptr, rows, i, d)))
+            .collect();
+        threads
+            .into_iter()
+            .try_for_each(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+    })
+}
+
+/// Pass 2: puts each entry in its row and writes the CSR arrays as `X` of
+/// `store`. `I` is the index type on disk, `T` the value type.
+fn fill_and_write<I, T>(
+    path: &Path,
+    c: Counts,
+    threads: usize,
+    store: &<H5 as Backend>::Store,
+) -> Result<()>
+where
+    I: BackendData + Copy + Default + Ord + Send + TryFrom<usize>,
+    T: BackendData + Copy + Default + Send + FromStr,
+{
+    let (h, nnz) = (c.h, c.indptr[c.h.nrows]);
+    let mut indices = vec![I::default(); nnz];
+    let mut data = vec![T::default(); nnz];
+    let slots = Slots::new(&mut indices, &mut data);
+    let (mut r, _) = open(path)?;
+    ensure!(
+        read_header(&mut r, &mut Vec::new())? == (h, c.start)
+            && std::fs::metadata(path)?.len() == c.len,
+        "{} changed after pass 1",
+        path.display()
+    );
+    match &c.body {
+        Body::Gzip => fill_part(&mut r, &c, 0, &slots)?,
+        Body::Plain(ranges) => {
+            drop(r);
+            run_parallel(ranges.len(), |k| {
+                fill_part(&mut open_range(path, &ranges[k])?, &c, k, &slots)
+            })?;
+        }
+    }
+    sort_rows(&c.indptr, &mut indices, &mut data, threads)?;
+    drop(c.parts);
+
+    let indptr: Vec<I> = c
+        .indptr
         .into_iter()
         .map(|x| I::try_from(x).map_err(|_| anyhow!("indptr value {x} overflows")))
         .collect::<Result<_>>()?;
@@ -306,19 +505,30 @@ where
 }
 
 /// Creates the h5ad file `output_path` with `X` read from the MatrixMarket
-/// file `mtx_path`, and returns it open.
+/// file `mtx_path`, and returns it open. A plain file is read by
+/// min(4, available parallelism) threads.
 pub(crate) fn mtx_to_anndata(mtx_path: &Path, output_path: &Path) -> Result<AnnData<H5>> {
+    // The thread count is only a hint: if the system cannot give it, one
+    // thread reads the file, as before this reader.
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_THREADS);
+    read_mtx(mtx_path, output_path, threads)
+}
+
+/// [`mtx_to_anndata`] with `threads` threads.
+fn read_mtx(mtx_path: &Path, output_path: &Path, threads: usize) -> Result<AnnData<H5>> {
     let ctx = || format!("cannot read {}", mtx_path.display());
-    let (h, indptr) = count_rows(mtx_path).with_context(ctx)?;
+    let c = count_rows(mtx_path, threads).with_context(ctx)?;
     // The index type rule of CsrMatrix::write: i32 if ncols - 1 and nnz fit, else i64.
-    let small =
-        i32::try_from(h.ncols.saturating_sub(1)).is_ok() && i32::try_from(indptr[h.nrows]).is_ok();
+    let small = i32::try_from(c.h.ncols.saturating_sub(1)).is_ok()
+        && i32::try_from(c.indptr[c.h.nrows]).is_ok();
     let store = H5::new(output_path)?;
-    match (small, h.integer) {
-        (true, false) => fill_and_write::<i32, f64>(mtx_path, &h, indptr, &store),
-        (false, false) => fill_and_write::<i64, f64>(mtx_path, &h, indptr, &store),
-        (true, true) => fill_and_write::<i32, i64>(mtx_path, &h, indptr, &store),
-        (false, true) => fill_and_write::<i64, i64>(mtx_path, &h, indptr, &store),
+    match (small, c.h.integer) {
+        (true, false) => fill_and_write::<i32, f64>(mtx_path, c, threads, &store),
+        (false, false) => fill_and_write::<i64, f64>(mtx_path, c, threads, &store),
+        (true, true) => fill_and_write::<i32, i64>(mtx_path, c, threads, &store),
+        (false, true) => fill_and_write::<i64, i64>(mtx_path, c, threads, &store),
     }
     .with_context(ctx)?;
     AnnData::<H5>::open(store)
@@ -382,18 +592,22 @@ mod tests {
     /// Reads `mtx` with this reader and with the path of af-anndata 8619966
     /// (`MMReader::finish`, which calls `set_x`), checks that X, the on-disk
     /// types and the layout are the same, removes `mtx`, and returns them.
+    /// The thread counts of the tests: one thread, and splits of the file
+    /// that fall inside lines, leave ranges with no line, and split rows.
+    const THREADS: [usize; 4] = [1, 2, 3, 7];
+
     fn same_as_mmreader(test: &str, mtx: &Path) -> StoredX {
-        let (a, b) = (
-            tmp(&format!("{test}_new"), "h5ad"),
-            tmp(&format!("{test}_old"), "h5ad"),
-        );
-        let new = x_of(mtx_to_anndata(mtx, &a).unwrap(), &a);
+        let b = tmp(&format!("{test}_old"), "h5ad");
         let old = AnnData::<H5>::new(&b).unwrap();
         MMReader::from_path(mtx).unwrap().finish(&old).unwrap();
         let old = x_of(old, &b);
+        for t in THREADS {
+            let a = tmp(&format!("{test}_new{t}"), "h5ad");
+            let new = x_of(read_mtx(mtx, &a, t).unwrap(), &a);
+            assert_eq!(new, old, "{t} threads and MMReader give a different X");
+        }
         std::fs::remove_file(mtx).unwrap();
-        assert_eq!(new, old, "this reader and MMReader give a different X");
-        new
+        old
     }
 
     fn csr_f64(x: ArrayData) -> CsrMatrix<f64> {
@@ -540,14 +754,22 @@ mod tests {
         assert_eq!(csr_f64(x).col_indices(), [0, 2_999_999_999]);
     }
 
+    /// The error for the file `s`; it must be the same for each thread count.
     fn err(test: &str, s: &str) -> String {
         let (mtx, out) = (text(test, s), tmp(test, "h5ad"));
-        let e = format!("{:#}", mtx_to_anndata(&mtx, &out).unwrap_err());
+        let errors: Vec<String> = THREADS
+            .iter()
+            .map(|&t| {
+                let e = format!("{:#}", read_mtx(&mtx, &out, t).unwrap_err());
+                if out.exists() {
+                    std::fs::remove_file(&out).unwrap();
+                }
+                e
+            })
+            .collect();
         std::fs::remove_file(&mtx).unwrap();
-        if out.exists() {
-            std::fs::remove_file(&out).unwrap();
-        }
-        e
+        assert!(errors.iter().all(|e| *e == errors[0]), "{errors:?}");
+        errors[0].clone()
     }
 
     // MMReader adds the values of a duplicate entry; this reader stops.
@@ -567,7 +789,7 @@ mod tests {
     #[test]
     fn more_entries_than_the_header_is_an_error() {
         let s = "%%MatrixMarket matrix coordinate real general\n2 2 1\n1 2 1\n2 1 1\n";
-        assert!(err("more", s).contains("has more than 1 entries"));
+        assert!(err("more", s).contains("header gives 1 entries, the file has 2"));
     }
 
     #[test]
@@ -600,14 +822,59 @@ mod tests {
         let sym = "%%MatrixMarket matrix coordinate real symmetric\n3 3 2\n1 1 1\n";
         let pass1 = text("pass1", &format!("{sym}2 1 1\n"));
         let pass2 = text("pass2", &format!("{sym}2 2 1\n"));
-        let out = tmp("passes", "h5ad");
-        let (h, indptr) = count_rows(&pass1).unwrap();
-        let e = fill_and_write::<i32, f64>(&pass2, &h, indptr, &H5::new(&out).unwrap());
-        for p in [pass1, pass2, out] {
+        for t in THREADS {
+            let out = tmp(&format!("passes{t}"), "h5ad");
+            let c = count_rows(&pass1, t).unwrap();
+            let e = fill_and_write::<i32, f64>(&pass2, c, t, &H5::new(&out).unwrap());
+            std::fs::remove_file(out).unwrap();
+            let e = format!("{:#}", e.unwrap_err());
+            assert!(e.contains("row 0 has fewer entries than in pass 1"), "{e}");
+        }
+        for p in [pass1, pass2] {
             std::fs::remove_file(p).unwrap();
         }
-        let e = format!("{:#}", e.unwrap_err());
-        assert!(e.contains("row 0 has fewer entries than in pass 1"), "{e}");
+    }
+
+    #[test]
+    fn each_cut_is_at_a_line_start_and_each_line_is_in_one_range() {
+        let p = text("cuts", REAL);
+        let (h, start) = read_header(&mut open(&p).unwrap().0, &mut Vec::new()).unwrap();
+        let bytes = std::fs::read(&p).unwrap();
+        let len = bytes.len() as u64;
+        for t in THREADS {
+            let ranges = split_lines(&p, start, len, t).unwrap();
+            assert_eq!(ranges.len(), t);
+            assert_eq!((ranges[0].start, ranges[t - 1].end), (start, len));
+            for w in ranges.windows(2) {
+                assert_eq!(w[0].end, w[1].start);
+                let cut = w[1].start as usize;
+                assert!(
+                    cut == bytes.len() || bytes[cut - 1] == b'\n',
+                    "cut {cut} is in a line"
+                );
+            }
+            let lines: usize = ranges
+                .iter()
+                .map(|r| {
+                    bytes[r.start as usize..r.end as usize]
+                        .iter()
+                        .filter(|&&b| b == b'\n')
+                        .count()
+                })
+                .sum();
+            assert_eq!(lines, h.entries);
+            if t == 7 {
+                assert!(
+                    ranges.iter().any(|r| r.is_empty()),
+                    "no empty range: {ranges:?}"
+                );
+            }
+        }
+        // Row 2 (index 1) of REAL has 4 entries; with 3 threads they are in more than one part.
+        let c = count_rows(&p, 3).unwrap();
+        assert!(c.parts.iter().filter(|part| part[1] > 0).count() > 1);
+        assert_eq!(c.indptr, [0, 2, 6, 6, 7]);
+        std::fs::remove_file(p).unwrap();
     }
 
     // MMReader drops the tokens of the size line that are not numbers, and
