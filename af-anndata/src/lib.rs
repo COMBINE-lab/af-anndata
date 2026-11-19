@@ -45,8 +45,7 @@
 //! [AnnData]: https://anndata.readthedocs.io/en/stable/
 
 use anndata::data::array::dataframe::DataFrameIndex;
-use anndata::{reader::MMReader, s, AnnData, AnnDataOp, ArrayData, ArrayElemOp};
-use anndata_hdf5::H5;
+use anndata::{s, AnnData, AnnDataOp, ArrayData, ArrayElemOp};
 use anyhow::{bail, Context};
 use polars::io::prelude::*;
 use polars::prelude::{
@@ -57,6 +56,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{error, info, trace, warn};
+
+mod mtx;
 
 /// Tags the actual type of matrix that has
 /// been populated in a `CSRMatPaack`
@@ -662,8 +663,6 @@ fn write_anndata(
     let mut sw = libsw::Sw::new();
     sw.start()?;
 
-    let r = MMReader::from_path(&p)?;
-
     let parse_opts = CsvParseOptions::default().with_separator(b'\t');
     // read the gene ids
     let mut col_df = match CsvReadOptions::default()
@@ -781,9 +780,8 @@ fn write_anndata(
         build_var_df(&gene_ids, gene_id_to_name_path.as_deref())?
     };
 
-    // make the AnnData object and populate it from the MMReader
-    let mut b = AnnData::<H5>::new(output_path)?;
-    r.finish(&b)?;
+    // make the AnnData object with X read from the MatrixMarket file
+    let mut b = mtx::mtx_to_anndata(&p, output_path)?;
     info!("Reading MM into AnnData took {:#?}", sw.elapsed());
 
     // read in the feature dump data
